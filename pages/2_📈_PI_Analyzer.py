@@ -285,18 +285,18 @@ def build_pi_decomp_table(overall, segments, contribs):
             'Frozen':  segments['Frozen'][key],
         })
     rows.append({
-        'Step': 'Result — Avg PI Cur (E)',
-        'Overall': overall['E'],
-        'Dry':     segments['Dry']['E'],
-        'Fresh':   segments['Fresh']['E'],
-        'Frozen':  segments['Frozen']['E'],
-    })
-    rows.append({
         'Step': 'Total Δ',
         'Overall': overall['total'],
         'Dry':     segments['Dry']['total'],
         'Fresh':   segments['Fresh']['total'],
         'Frozen':  segments['Frozen']['total'],
+    })
+    rows.append({
+        'Step': 'Result — Avg PI Cur (E)',
+        'Overall': overall['E'],
+        'Dry':     segments['Dry']['E'],
+        'Fresh':   segments['Fresh']['E'],
+        'Frozen':  segments['Frozen']['E'],
     })
     return pd.DataFrame(rows)
 
@@ -305,15 +305,31 @@ def build_pi_contrib_table(overall, contribs):
     """
     Tabel 2: Per-segment contribution to OVERALL effect (exact math identity).
     Each cell = exact_contributions formula. Sum across segments = overall (exact).
-    Bottom 2 rows: Overall PI Prev (A) and Cur (E) reference values.
+    Structure:
+      - Row 1: Overall PI Prev (A) [baseline reference, top]
+      - Rows 2-7: 6 effects (Churned, Price, Comp, Normal, Discount, New)
+      - Row 8: Total Δ (sum of effects)
+      - Row 9: Overall PI Cur (E) [result reference, bottom]
     """
     rows = []
+
+    # Row 1: Baseline reference (top)
+    rows.append({
+        'Effect': 'Overall PI Prev (A)',
+        'Dry contrib':    None,
+        'Fresh contrib':  None,
+        'Frozen contrib': None,
+        'Overall (sum)':  None,
+        'Overall actual': overall['A'],
+    })
+
+    # Rows 2-7: 6 effects
     for label, key in [
         ('1. Churned SKU Effect',                  'eff_dep'),
         ('2. Price Change Effect',                 'eff_price'),
-        ('3. Comp Price Effect',          'eff_comp'),
-        ('  3.1 Normal Comp Price Effect',               'eff_normal_comp'),
-        ('  3.2 Discount (Blended) Comp Price Effect',   'eff_discount_comp'),
+        ('3. Comp Price Effect',                   'eff_comp'),
+        ('  3.1 Normal Comp Price Effect',         'eff_normal_comp'),
+        ('  3.2 Discount (Blended) Comp Price Effect', 'eff_discount_comp'),
         ('4. New SKU Effect',                      'eff_new'),
     ]:
         rows.append({
@@ -325,15 +341,20 @@ def build_pi_contrib_table(overall, contribs):
             'Overall actual': overall[key],
         })
 
-    # Reference rows: Overall PI Prev (A) → Cur (E)
+    # Row 8: Total Δ (sum of leaf effects: dep + price + comp + new). eff_comp already = normal+discount
+    total_dry    = contribs['Dry']['eff_dep'] + contribs['Dry']['eff_price'] + contribs['Dry']['eff_comp'] + contribs['Dry']['eff_new']
+    total_fresh  = contribs['Fresh']['eff_dep'] + contribs['Fresh']['eff_price'] + contribs['Fresh']['eff_comp'] + contribs['Fresh']['eff_new']
+    total_frozen = contribs['Frozen']['eff_dep'] + contribs['Frozen']['eff_price'] + contribs['Frozen']['eff_comp'] + contribs['Frozen']['eff_new']
     rows.append({
-        'Effect': 'Overall PI Prev (A)',
-        'Dry contrib':    None,
-        'Fresh contrib':  None,
-        'Frozen contrib': None,
-        'Overall (sum)':  None,
-        'Overall actual': overall['A'],
+        'Effect': 'Total Δ',
+        'Dry contrib':    total_dry,
+        'Fresh contrib':  total_fresh,
+        'Frozen contrib': total_frozen,
+        'Overall (sum)':  total_dry + total_fresh + total_frozen,
+        'Overall actual': overall['total'],
     })
+
+    # Row 9: Result reference (bottom)
     rows.append({
         'Effect': 'Overall PI Cur (E)',
         'Dry contrib':    None,
@@ -1095,14 +1116,14 @@ if st.session_state.pi_analysis is not None:
                 # Reference rows: PI value (not delta, not signed)
                 out[c] = f"{row[c]:.4f}"
             else:
-                # Effect rows: signed delta format
+                # Effect & Total rows: signed delta format
                 out[c] = f"{row[c]:+.4f}"
         return out
     t2_display = pd.DataFrame([fmt_t2_row(r) for _, r in t2.iterrows()])
 
     def style_t2(orig, disp):
-        # vmax only from effect rows (exclude reference rows)
-        effect_mask = ~orig['Effect'].isin(['Overall PI Prev (A)', 'Overall PI Cur (E)'])
+        # vmax from EFFECT rows only (exclude reference + Total Δ to keep contrast)
+        effect_mask = ~orig['Effect'].isin(['Overall PI Prev (A)', 'Overall PI Cur (E)', 'Total Δ'])
         vals = orig.loc[effect_mask, t2_cols].values.flatten()
         vals = [v for v in vals if pd.notna(v)]
         vmax = max(abs(v) for v in vals) if vals else 1
@@ -1111,11 +1132,14 @@ if st.session_state.pi_analysis is not None:
         def apply_row(row):
             label = orig.loc[row.name, 'Effect']
             is_ref = label in ('Overall PI Prev (A)', 'Overall PI Cur (E)')
+            is_total = label == 'Total Δ'
             styles = []
             for col in disp.columns:
                 if col == 'Effect':
                     if is_ref:
                         styles.append('background-color: #F3F4F6; font-weight: 700;')
+                    elif is_total:
+                        styles.append('background-color: #DBEAFE; font-weight: 700;')
                     else:
                         styles.append('')
                 else:
@@ -1125,6 +1149,9 @@ if st.session_state.pi_analysis is not None:
                             styles.append('background-color: #DBEAFE; font-weight: 700;')
                         else:
                             styles.append('background-color: #F3F4F6; color: #9CA3AF;')
+                    elif is_total:
+                        v = orig.loc[row.name, col]
+                        styles.append(gradient_color(v, vmax) + ' font-weight: 700;')
                     else:
                         v = orig.loc[row.name, col]
                         styles.append(gradient_color(v, vmax))
@@ -1241,24 +1268,25 @@ if st.session_state.pi_analysis is not None:
                 label_visibility='collapsed'
             )
 
-        # Up/Down/Stay legend
-        with st.expander("ℹ️ Apa arti Up / Stay / Down?", expanded=False):
+        # Up/Down/Stay legend (threshold sesuai engine pi_analyzer_v1.py line 182-184)
+        with st.expander("ℹ️ Apa arti Up / Stay / Down? (Threshold)", expanded=False):
             st.markdown("""
-            **PRICE direction** (Astro):
-            - **PRICE Down** = harga Astro turun ≥ threshold (vs P1)
-            - **PRICE Stay** = harga Astro relatif sama (gak ada perubahan signifikan)
-            - **PRICE Up** = harga Astro naik ≥ threshold
+            **Threshold tagging** (sama untuk Price, COGS, Comp):
 
-            **COMP direction** (blended competitor):
-            - **COMP Down** = harga competitor blended turun
-            - **COMP Stay** = harga competitor blended relatif sama
-            - **COMP Up** = harga competitor blended naik
+            | Tag | Kondisi |
+            |---|---|
+            | **Up** | Δ absolute ≥ **+5,000 IDR** **OR** Δ percent ≥ **+5%** |
+            | **Down** | Δ absolute ≤ **-5,000 IDR** **OR** Δ percent ≤ **-5%** |
+            | **Stay** | selain Up dan Down (Δ < 5,000 IDR dan abs Δ % < 5%) |
 
-            **Interpretation cell:**
+            **PRICE direction** = pergerakan harga Astro dari P1 ke P2
+            **COMP direction** = pergerakan harga blended competitor dari P1 ke P2
+
+            **Cell interpretation:**
             - **Diagonal (Down-Down / Stay-Stay / Up-Up)**: Astro **follow** gerakan competitor — pricing aligned
-            - **Off-diagonal (e.g. Stay-Up)**: Astro **NOT follow** competitor — kemungkinan miss opportunity atau over-react
-            - **PRICE Stay × COMP Up**: competitor naik harga tapi Astro stay → PI turun otomatis (advantage), bisa jadi opportunity untuk naik price juga
-            - **PRICE Stay × COMP Down**: competitor turun tapi Astro stay → PI naik otomatis (uncompetitive), butuh respond
+            - **Off-diagonal**: Astro **NOT follow** competitor — misaligned
+            - **PRICE Stay × COMP Up**: competitor naik harga, Astro stay → PI Astro turun otomatis (lebih kompetitif), bisa jadi opportunity raise price
+            - **PRICE Stay × COMP Down**: competitor turun harga, Astro stay → PI Astro naik otomatis (uncompetitive), butuh respond
             """)
 
         # Count matrix with Total row/col
@@ -1546,39 +1574,77 @@ if st.session_state.pi_analysis is not None:
 
     st.caption(f"**Scope: {quad_scope}** · **PI period: {quad_period}** · "
                f"**View: {quad_view}** · {n_q_total:,} Existing SKU")
+    st.caption("📌 *Note: 'PI period' filter berlaku untuk tab 1-3. Tab 'PI Prev vs PI Cur Transition' selalu pakai Prev × Cur.*")
 
-    quad_tabs = st.tabs(["PI vs Margin", "COGS Index vs PI", "COGS Index vs Margin"])
+    quad_tabs = st.tabs([
+        "PI vs Margin",
+        "COGS Index vs PI",
+        "COGS Index vs Margin",
+        "🔁 PI Prev vs PI Cur (Transition)"
+    ])
 
     def render_cross_matrix(cross, row_remap, col_remap, view_mode, n_total):
-        """Render cross-tab with label remap + optional %, gradient."""
+        """Render cross-tab with label remap + Total row/col + gradient."""
         # Remap labels (display only)
         cross_disp = cross.copy()
         cross_disp.index = [row_remap.get(i, i) for i in cross_disp.index]
         cross_disp.columns = [col_remap.get(c, c) for c in cross_disp.columns]
 
         if view_mode == 'Amount (SKU)':
-            max_v = cross_disp.values.max() if cross_disp.values.size > 0 else 1
-            def color_count(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = min(1.0, val / max_v) if max_v > 0 else 0
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-            st.dataframe(cross_disp.style.format("{:,}").map(color_count),
+            # Add Total row + col
+            m = cross_disp.copy()
+            m['Total'] = m.sum(axis=1)
+            m.loc['TOTAL'] = m.sum(axis=0)
+
+            # Gradient based on non-Total cells only
+            inner = cross_disp.values
+            max_v = inner.max() if inner.size > 0 else 1
+
+            def style_amt(df_):
+                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
+                for i in df_.index:
+                    for c in df_.columns:
+                        if i == 'TOTAL' or c == 'Total':
+                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
+                        else:
+                            val = df_.loc[i, c]
+                            if pd.notna(val) and val > 0:
+                                alpha = min(1.0, val / max_v) if max_v > 0 else 0
+                                r = int(255 - (255-22) * alpha)
+                                g = int(255 - (255-163) * alpha)
+                                b = int(255 - (255-74) * alpha)
+                                styles.loc[i, c] = f'background-color: rgb({r},{g},{b}); color: #111827;'
+                return styles
+
+            st.dataframe(m.style.format("{:,}").apply(style_amt, axis=None),
                          use_container_width=True)
         else:
-            # % mode
+            # % mode — % of n_total
             pct = cross_disp / n_total * 100
-            max_v = pct.values.max() if pct.values.size > 0 else 1
-            def color_pct(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = min(1.0, val / max_v) if max_v > 0 else 0
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-            st.dataframe(pct.style.format("{:.1f}%").map(color_pct),
+            pct_with_total = pct.copy()
+            pct_with_total['Total'] = pct_with_total.sum(axis=1)
+            pct_with_total.loc['TOTAL'] = pct_with_total.sum(axis=0)
+
+            inner_pct = pct.values
+            max_v = inner_pct.max() if inner_pct.size > 0 else 1
+
+            def style_pct(df_):
+                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
+                for i in df_.index:
+                    for c in df_.columns:
+                        if i == 'TOTAL' or c == 'Total':
+                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
+                        else:
+                            val = df_.loc[i, c]
+                            if pd.notna(val) and val > 0:
+                                alpha = min(1.0, val / max_v) if max_v > 0 else 0
+                                r = int(255 - (255-22) * alpha)
+                                g = int(255 - (255-163) * alpha)
+                                b = int(255 - (255-74) * alpha)
+                                styles.loc[i, c] = f'background-color: rgb({r},{g},{b}); color: #111827;'
+                return styles
+
+            st.dataframe(pct_with_total.style.format("{:.1f}%").apply(style_pct, axis=None),
                          use_container_width=True)
 
     with quad_tabs[0]:
@@ -1612,6 +1678,42 @@ if st.session_state.pi_analysis is not None:
             st.markdown(f"**COGS Index (rows) × Margin Bucket (cols)**")
             render_cross_matrix(cross3, CI_LBL_DISPLAY, MG_LBL_DISPLAY, quad_view, n_q_total)
             st.caption("💡 High CI (D/E) + Low Margin = structural loss (cost mahal + margin tipis).")
+
+    # ── Tab 4: PI Prev → PI Cur Transition Matrix ──
+    with quad_tabs[3]:
+        st.markdown(f"**PI Bucket Prev (rows, P1) × PI Bucket Cur (cols, P2)** — SKU movement antar bucket")
+        # Note: transition matrix ignores quad_period filter (always uses Prev × Cur)
+        # but respects quad_scope and quad_view
+        if 'pi_group_prev' in ex_only_q.columns and 'pi_group_cur' in ex_only_q.columns:
+            cross_trans = pd.crosstab(
+                ex_only_q['pi_group_prev'],
+                ex_only_q['pi_group_cur']
+            ).reindex(index=PI_BINS_LBL, columns=PI_BINS_LBL, fill_value=0)
+            render_cross_matrix(cross_trans, PI_LBL_DISPLAY, PI_LBL_DISPLAY, quad_view, n_q_total)
+
+            # Movement summary
+            n_total_trans = int(cross_trans.values.sum())
+            n_diag = int(sum(cross_trans.iloc[i, i] for i in range(len(PI_BINS_LBL))))
+            n_off = n_total_trans - n_diag
+
+            # Direction (upper triangle = moved to higher bucket = more expensive vs comp; lower triangle = inverse)
+            n_up = int(sum(cross_trans.iloc[i, j] for i in range(len(PI_BINS_LBL))
+                                                  for j in range(len(PI_BINS_LBL)) if j > i))
+            n_down = int(sum(cross_trans.iloc[i, j] for i in range(len(PI_BINS_LBL))
+                                                    for j in range(len(PI_BINS_LBL)) if j < i))
+
+            st.caption(
+                f"💡 **Diagonal** (stay di bucket sama): **{n_diag:,}** SKU "
+                f"({n_diag/n_total_trans*100:.1f}%). "
+                f"**Off-diagonal** (shift): **{n_off:,}** SKU. "
+                f"Upper triangle (PI naik = lebih mahal vs comp): **{n_up:,}**. "
+                f"Lower triangle (PI turun = lebih kompetitif): **{n_down:,}**."
+            )
+            st.caption(
+                "**Interpretation:** Pola transition kasih insight macro tentang shift positioning portfolio Astro. "
+                "Mayoritas di diagonal = portfolio stabil. Banyak movement ke bawah-kiri = portfolio jadi lebih kompetitif. "
+                "Banyak movement ke atas-kanan = portfolio jadi lebih premium / mahal."
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # ZONE 9 — FRAMEWORK CHECK
