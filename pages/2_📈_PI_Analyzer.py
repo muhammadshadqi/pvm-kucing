@@ -578,11 +578,31 @@ def build_top_movers_pi(df, n=30):
 
 
 def fmt_mover_row(r, idx):
-    """Format single row for mover table display."""
+    """Format single row for mover table display. Includes before/after for price, comp, COGS."""
     pi_p1 = r.get('pi', np.nan)
     pi_p2 = r.get('next_pi', np.nan)
     mgn_p1 = r.get('margin_pct_prev', np.nan)
     mgn_p2 = r.get('margin_pct_cur', np.nan)
+
+    # Price before/after
+    price_p1 = r.get('price', np.nan)
+    price_p2 = r.get('next_price', np.nan)
+
+    # Competitor BLENDED price before/after (comp_price = blended effective comp)
+    comp_p1 = r.get('comp_price', np.nan)
+    comp_p2 = r.get('next_comp_price', np.nan)
+
+    # COGS before/after
+    cogs_p1 = r.get('cogs', np.nan)
+    cogs_p2 = r.get('next_cogs', np.nan)
+
+    def fmt_pair(v1, v2, decimals=0):
+        if pd.notna(v1) and pd.notna(v2):
+            if decimals == 0:
+                return f"{v1:,.0f} → {v2:,.0f}"
+            return f"{v1:,.{decimals}f} → {v2:,.{decimals}f}"
+        return "—"
+
     return {
         '#': idx,
         'Product': str(r.get('product_name', '—'))[:35],
@@ -590,13 +610,14 @@ def fmt_mover_row(r, idx):
         'L1': r.get('l1_category_name', '—'),
         'PI P1 → P2': f"{pi_p1:.1f} → {pi_p2:.1f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—",
         'Δ PI': r.get('diff_pi', 0),
+        'Price P1 → P2':  fmt_pair(price_p1, price_p2),
+        'Comp P1 → P2':   fmt_pair(comp_p1, comp_p2),
+        'COGS P1 → P2':   fmt_pair(cogs_p1, cogs_p2),
+        'Mgn P1 → P2': f"{mgn_p1*100:.1f}% → {mgn_p2*100:.1f}%" if pd.notna(mgn_p1) and pd.notna(mgn_p2) else "—",
         'Price Eff': r.get('eff_price', 0),
         'Comp Price Eff': r.get('eff_comp', 0),
         'Normal Comp Eff': r.get('eff_normal_comp', 0),
         'Discount Comp Eff': r.get('eff_discount_comp', 0),
-        'Mgn P1 → P2': f"{mgn_p1*100:.1f}% → {mgn_p2*100:.1f}%" if pd.notna(mgn_p1) and pd.notna(mgn_p2) else "—",
-        'Price Δ%': r.get('diff_price_pct', np.nan),
-        'COGS Δ%': r.get('diff_cogs_pct', np.nan),
         'Framework': r.get('framework_check', '') or '',
     }
 
@@ -1433,8 +1454,6 @@ if st.session_state.pi_analysis is not None:
         'Comp Price Eff': '{:+.3f}',
         'Normal Comp Eff': '{:+.3f}',
         'Discount Comp Eff': '{:+.3f}',
-        'Price Δ%': '{:+.2%}',
-        'COGS Δ%': '{:+.2%}',
     }
 
     # Tab 1: by Δ PI
