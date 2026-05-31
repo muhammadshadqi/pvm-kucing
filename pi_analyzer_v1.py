@@ -1679,9 +1679,10 @@ def build_s12(wb, ov, sr):
 # ─────────────────────────────────────────────
 # CALLABLE ENTRY POINT (refactored from main)
 # ─────────────────────────────────────────────
-def analyze(df_raw):
+def compute(df_raw):
     """
-    Main entry point for Streamlit integration.
+    Fast analytical computation only — NO Excel workbook generation.
+    Returns dict for Streamlit display (~3 seconds for 10K rows).
 
     Args:
         df_raw: pandas DataFrame with required raw columns
@@ -1690,26 +1691,50 @@ def analyze(df_raw):
         dict with keys:
             - df_enriched: enriched DataFrame (~+30 derived cols)
             - period_type: 'week' or 'month'
+            - period_col, next_col: column names
             - period_p1, period_p2: period labels (strings)
             - overall: decompose() result for entire dataset
             - segments: dict of decompose() per BL (Dry/Fresh/Frozen)
             - contribs: exact_contributions() dict
-            - workbook: openpyxl Workbook (13 sheets) for download
     """
     period_type, period_col, next_col = detect_period(df_raw)
-
     d = enrich(df_raw)
-
     p1 = str(d[period_col].dropna().iloc[0])
     p2 = str(d[next_col].dropna().iloc[0])
-
-    # Pre-compute aggregates once
     ov, sr, contribs = precompute(d)
 
-    # Build workbook
-    wb = Workbook()
-    # Note: build_s1 uses wb.active to rename default sheet to "1. Raw Data"
+    return {
+        'df_enriched': d,
+        'period_type': period_type,
+        'period_col': period_col,
+        'next_col': next_col,
+        'period_p1': p1,
+        'period_p2': p2,
+        'overall': ov,
+        'segments': sr,
+        'contribs': contribs,
+    }
 
+
+def generate_excel(result):
+    """
+    Generate 13-sheet Excel workbook from compute() result.
+    SLOW (~50s for 10K rows) — only call when user requests download.
+
+    Args:
+        result: dict returned from compute()
+
+    Returns:
+        openpyxl Workbook
+    """
+    d = result['df_enriched']
+    period_col = result['period_col']
+    next_col = result['next_col']
+    ov = result['overall']
+    sr = result['segments']
+    contribs = result['contribs']
+
+    wb = Workbook()
     build_s1(wb, d, period_col, next_col)
     s1b_addr = build_s1b(wb, ov, sr, contribs)
     build_s2(wb, s1b_addr, ov, sr, contribs)
@@ -1724,18 +1749,17 @@ def analyze(df_raw):
     build_s11(wb, d)
     build_s12(wb, ov, sr)
 
-    return {
-        'df_enriched': d,
-        'period_type': period_type,
-        'period_col': period_col,
-        'next_col': next_col,
-        'period_p1': p1,
-        'period_p2': p2,
-        'overall': ov,
-        'segments': sr,
-        'contribs': contribs,
-        'workbook': wb,
-    }
+    return wb
+
+
+def analyze(df_raw):
+    """
+    Legacy wrapper for backwards compatibility — runs compute() + generate_excel().
+    For Streamlit, prefer using compute() + generate_excel() separately.
+    """
+    result = compute(df_raw)
+    result['workbook'] = generate_excel(result)
+    return result
 
 
 # ─────────────────────────────────────────────
