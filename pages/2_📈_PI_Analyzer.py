@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 
 # Add parent dir to path so we can import pi_analyzer_v1
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pi_analyzer_v1 import analyze as pi_analyze
+from pi_analyzer_v1 import compute as pi_compute, generate_excel as pi_generate_excel
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -25,6 +25,31 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="auto",
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CACHED HELPERS (analytical computation cached by file hash)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=3)
+def cached_pi_compute(file_bytes, file_name):
+    """Cache PI compute result by file content hash. Excel NOT included."""
+    import io
+    if file_name.lower().endswith('.csv'):
+        df = pd.read_csv(io.BytesIO(file_bytes))
+    else:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    return pi_compute(df)
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def cached_pi_excel_bytes(file_bytes, file_name):
+    """Cache Excel workbook bytes (separate cache from compute)."""
+    import io
+    result = cached_pi_compute(file_bytes, file_name)
+    wb = pi_generate_excel(result)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 # Custom CSS — mirror Page 1
 st.markdown("""
@@ -584,6 +609,8 @@ def build_cogs_need_improve(df):
 # ─────────────────────────────────────────────────────────────────────────────
 if 'pi_analysis' not in st.session_state:
     st.session_state.pi_analysis = None
+if 'pi_file_bytes' not in st.session_state:
+    st.session_state.pi_file_bytes = None
 if 'pi_uploaded_file_name' not in st.session_state:
     st.session_state.pi_uploaded_file_name = None
 if 'pi_uploaded_file_size' not in st.session_state:
@@ -602,8 +629,12 @@ with col_clear:
     if st.session_state.pi_analysis is not None:
         if st.button("🗑️ Clear data", type="secondary", use_container_width=True, key='pi_clear'):
             st.session_state.pi_analysis = None
+            st.session_state.pi_file_bytes = None
             st.session_state.pi_uploaded_file_name = None
             st.session_state.pi_uploaded_file_size = None
+            st.session_state.pi_excel_ready = False
+            if 'pi_excel_bytes' in st.session_state:
+                del st.session_state.pi_excel_bytes
             st.rerun()
 
 
@@ -644,11 +675,13 @@ file_changed = (
 )
 
 if file_changed:
+    # Read file bytes ONCE for caching (read once, use everywhere)
+    file_bytes = uploaded.getvalue()
     try:
         if uploaded.name.lower().endswith('.csv'):
-            df_input = pd.read_csv(uploaded)
+            df_input = pd.read_csv(io.BytesIO(file_bytes))
         else:
-            df_input = pd.read_excel(uploaded)
+            df_input = pd.read_excel(io.BytesIO(file_bytes))
     except Exception as e:
         st.error(f"❌ Gagal load file: {e}")
         st.stop()
@@ -689,17 +722,18 @@ if file_changed:
         else:
             st.success(f"✅ Semua {len(REQUIRED_COLS)} required columns OK")
 
-    # Process button
+    # Process button — FAST path now (cached compute, no Excel build yet)
     if st.button("🚀 Process Data", type="primary", key='pi_process'):
-        with st.spinner("Running PI analysis... ini bisa makan ~60 detik untuk dataset besar"):
+        with st.spinner("Running PI analysis (fast path)..."):
             try:
-                result = pi_analyze(df_input)
+                result = cached_pi_compute(file_bytes, uploaded.name)
             except Exception as e:
                 st.error(f"❌ Analyze error: {e}")
                 st.exception(e)
                 st.stop()
 
             st.session_state.pi_analysis = result
+            st.session_state.pi_file_bytes = file_bytes  # for lazy Excel
             st.session_state.pi_uploaded_file_name = uploaded.name
             st.session_state.pi_uploaded_file_size = uploaded.size
             st.success(f"✅ Selesai! {len(result['df_enriched']):,} rows processed.")
@@ -1331,26 +1365,48 @@ if st.session_state.pi_analysis is not None:
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # DOWNLOAD EXCEL
+    # DOWNLOAD EXCEL (LAZY — only build when user clicks)
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">📥 Download Full Report</div>', unsafe_allow_html=True)
-    st.caption("Download complete 13-sheet Excel report (sama persis output script pi_analyzer_v1.py).")
-
-    # Save workbook to bytes
-    excel_buffer = io.BytesIO()
-    result['workbook'].save(excel_buffer)
-    excel_buffer.seek(0)
+    st.caption("Download complete 13-sheet Excel report (sama persis output script pi_analyzer_v1.py). "
+               "Build Excel akan butuh ~50-60 detik karena ada styling per-cell. Klik tombol di bawah saat lo butuh.")
 
     out_name = f"PI_Analysis_{result['period_type']}_{period_p1}_vs_{period_p2}.xlsx"
-    st.download_button(
-        "📥 Download Excel (13 sheets)",
-        data=excel_buffer,
-        file_name=out_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=False,
-        key='pi_excel_download'
-    )
+
+    # Lazy generation: only build Excel when user clicks "Prepare Excel"
+    if 'pi_excel_ready' not in st.session_state:
+        st.session_state.pi_excel_ready = False
+
+    if not st.session_state.pi_excel_ready:
+        if st.button("🔨 Build Excel Report (~60s)", type="primary", key='pi_excel_prepare'):
+            with st.spinner("Building 13-sheet Excel workbook... ini bisa makan ~60 detik."):
+                try:
+                    excel_bytes = cached_pi_excel_bytes(
+                        st.session_state.pi_file_bytes,
+                        st.session_state.pi_uploaded_file_name
+                    )
+                    st.session_state.pi_excel_bytes = excel_bytes
+                    st.session_state.pi_excel_ready = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Excel build error: {e}")
+                    st.exception(e)
+    else:
+        st.success("✅ Excel report ready. Click below to download.")
+        st.download_button(
+            "📥 Download Excel (13 sheets)",
+            data=st.session_state.pi_excel_bytes,
+            file_name=out_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=False,
+            key='pi_excel_download'
+        )
+        if st.button("🔄 Rebuild Excel", type="secondary", key='pi_excel_rebuild'):
+            st.session_state.pi_excel_ready = False
+            if 'pi_excel_bytes' in st.session_state:
+                del st.session_state.pi_excel_bytes
+            st.rerun()
 
 else:
     st.info("⬆️ Upload file PI raw data untuk mulai analisis. Format mengikuti `pi_analyzer_v1.py`.")
