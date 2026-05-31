@@ -1,32 +1,29 @@
 """
-PI Analyzer — Streamlit Web App (Page 2)
-Pricing Index movement decomposition vs competitor.
+PVM Analyzer — Streamlit Web App (Page 1)
+Pricing × Volume × Mix decomposition for week/month-over-week pricing analysis.
 
 Author: Shadqi (Pricing Strategy Analyst, Astro)
 """
 import io
-import sys
-import os
+import math
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# Add parent dir to path so we can import pi_analyzer_v1
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pi_analyzer_v1 import analyze as pi_analyze
+from pvm_analyzer_v3 import analyze
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PI Analyzer — Astro Pricing",
-    page_icon="📈",
+    page_title="PVM Analyzer — Astro Pricing",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="auto",
 )
 
-# Custom CSS — mirror Page 1
+# Custom CSS — minimal, focused on KPI cards & banner
 st.markdown("""
 <style>
     .main > div { padding-top: 1rem; }
@@ -43,6 +40,7 @@ st.markdown("""
     .kpi-delta-neg { font-size: 14px; color: #DC2626; font-weight: 600; }
     .kpi-delta-neu { font-size: 14px; color: #6B7280; font-weight: 600; }
     .kpi-sub { font-size: 11px; color: #9CA3AF; margin-top: 4px; }
+
     .banner-warn {
         background: #FEF3C7;
         border-left: 4px solid #F59E0B;
@@ -50,157 +48,216 @@ st.markdown("""
         border-radius: 6px;
         margin-bottom: 16px;
     }
-    .banner-info {
-        background: #DBEAFE;
-        border-left: 4px solid #2563EB;
+    .banner-ok {
+        background: #D1FAE5;
+        border-left: 4px solid #10B981;
         padding: 12px 16px;
         border-radius: 6px;
         margin-bottom: 16px;
     }
+    .banner-title { font-weight: 700; margin-bottom: 4px; }
+
     .section-header {
-        font-size: 22px;
+        font-size: 18px;
         font-weight: 700;
         color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
+        margin-top: 24px;
+        margin-bottom: 8px;
+        padding-bottom: 4px;
         border-bottom: 2px solid #E5E7EB;
     }
+    .section-sub { font-size: 13px; color: #6B7280; margin-bottom: 12px; }
+
+    .mover-card {
+        border: 1px solid #E5E7EB;
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-bottom: 6px;
+        background: #FFFFFF;
+        font-size: 12px;
+    }
+    .mover-rank { font-weight: 700; color: #6B7280; }
+    .mover-name { font-weight: 600; color: #111827; }
+    .mover-gain { color: #059669; font-weight: 600; }
+    .mover-loss { color: #DC2626; font-weight: 600; }
+    .mover-meta { color: #6B7280; font-size: 11px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-REQUIRED_COLS = [
-    'product_id', 'product_name', 'l1_category_name', 'pricing_bl_25',
-    'pareto_classification', 'source_status',
-    'price', 'next_price', 'cogs', 'next_cogs',
-    'comp_price', 'next_comp_price',
-    'normal_comp_price', 'next_normal_comp_price',
-    'pi', 'next_pi',
-]
-PERIOD_PAIRS = [('week_key', 'next_week'), ('month_key', 'next_month')]
+REQUIRED_COLS = ['selling_price', 'selling_price1', 'cost_price', 'cost_price1', 'qty', 'qty1']
+OPTIONAL_COLS = ['comp_price', 'comp_price1', 'pi', 'pi1', 'avg_stock', 'avg_stock1',
+                 'pareto_classification', 'margin_pct', 'margin1_pct']
+DIM_COLS = ['pricing_bl_25', 'l1_category_name', 'business_lines_2025']
+PERIOD_PAIRS = [('week_key', 'next_week'), ('week_key', 'next_key'), ('month_key', 'next_month')]
 
-SEGMENTS = ['Dry', 'Fresh', 'Frozen']
-
-PI_BINS_LBL  = ["A.<95", "B.95-<100", "C.100-105", "D.105-110", "E.110-120", "F.>120"]
-CI_BINS_LBL  = ["A.<70", "B.70-85", "C.85-95", "D.95-105", "E.>105"]
-MG_BINS_LBL  = ["A.<-20%", "B.-20to-10%", "C.-10to0%", "D.0to10%",
-                "E.10to20%", "F.20to30%", "G.30to50%", "H.>50%"]
+BL_ORDER = ['Dry', 'Fresh', 'Frozen', 'PL']
+BL_COLORS = {'Dry': '#3B82F6', 'Fresh': '#10B981', 'Frozen': '#06B6D4', 'PL': '#8B5CF6'}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def fmt_pi(v, decimals=2):
-    """Format PI value (just a number, no unit since PI is unitless ratio)."""
-    if pd.isna(v): return "—"
-    return f"{v:,.{decimals}f}"
-
-def fmt_pi_delta(v, decimals=3):
-    """Format PI delta with sign."""
-    if pd.isna(v): return "—"
-    return f"{v:+.{decimals}f}"
+def fmt_rp(v, compact=True):
+    """Format Indonesian Rupiah."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "—"
+    av = abs(v)
+    sign = "-" if v < 0 else ""
+    if compact:
+        if av >= 1e12: return f"{sign}{av/1e12:.2f} T"
+        if av >= 1e9:  return f"{sign}{av/1e9:.2f} B"
+        if av >= 1e6:  return f"{sign}{av/1e6:.1f} M"
+        if av >= 1e3:  return f"{sign}{av/1e3:.0f} K"
+    return f"{sign}{av:,.0f}"
 
 def fmt_pct(v, decimals=2):
-    if pd.isna(v): return "—"
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "—"
     return f"{v*100:.{decimals}f}%"
 
-def fmt_count(v):
-    if pd.isna(v): return "—"
-    return f"{int(v):,}"
+def fmt_pp(v, decimals=2):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "—"
+    sign = "+" if v >= 0 else ""
+    return f"{sign}{v*100:.{decimals}f}pp"
 
 def kpi_card(label, value, delta=None, delta_label=None, sub=None, delta_inverse=False):
-    """Build HTML for KPI card."""
-    delta_html = ""
-    if delta is not None and delta_label is not None:
-        if delta == 0:
-            cls = "kpi-delta-neu"
-            arrow = "—"
+    """Render a KPI card. delta_inverse: True if lower is better (e.g. cost)."""
+    if delta is None:
+        delta_html = ""
+    else:
+        if delta > 0:
+            css_class = "kpi-delta-neg" if delta_inverse else "kpi-delta-pos"
+            arrow = "▲"
+        elif delta < 0:
+            css_class = "kpi-delta-pos" if delta_inverse else "kpi-delta-neg"
+            arrow = "▼"
         else:
-            # delta_inverse=True means lower=better (e.g. PI lower vs competitor)
-            is_positive = delta > 0
-            if delta_inverse:
-                cls = "kpi-delta-neg" if is_positive else "kpi-delta-pos"
-            else:
-                cls = "kpi-delta-pos" if is_positive else "kpi-delta-neg"
-            arrow = "▲" if is_positive else "▼"
-        delta_html = f'<div class="{cls}">{arrow} {delta_label}</div>'
-
+            css_class = "kpi-delta-neu"; arrow = "■"
+        delta_html = f'<div class="{css_class}">{arrow} {delta_label}</div>'
     sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    # IMPORTANT: do NOT indent — Streamlit treats 4+ leading spaces as code blocks
+    return (
+        f'<div class="kpi-card">'
+        f'<div class="kpi-label">{label}</div>'
+        f'<div class="kpi-value">{value}</div>'
+        f'{delta_html}'
+        f'{sub_html}'
+        f'</div>'
+    )
 
-    return f'''<div class="kpi-card">
-<div class="kpi-label">{label}</div>
-<div class="kpi-value">{value}</div>
-{delta_html}
-{sub_html}
-</div>'''
+def detect_anomalies(pvm):
+    """Return list of anomaly dicts. Trigger: GP Δ% < -3% OR qty Δ% < -4%."""
+    anomalies = []
+    for bl in BL_ORDER:
+        d = pvm.get(bl)
+        if not d: continue
+        # Recompute pct changes
+        gp_p1 = d.get('gp_start', 0)
+        gp_p2 = d.get('gp_end', 0)
+        gp_pct = (gp_p2 - gp_p1) / gp_p1 if gp_p1 else 0
+        # For qty, we need to sum qty per BL — but pvm only has aggregated GV/GP.
+        # Approximate qty pct via GV pct as proxy (since qty pct not directly stored).
+        # We'll use GV pct change as approximation here, with note in label.
+        gv_p1 = d.get('gv_start', 0)
+        gv_p2 = d.get('gv_end', 0)
+        gv_pct = (gv_p2 - gv_p1) / gv_p1 if gv_p1 else 0
 
+        gp_diff = gp_p2 - gp_p1
+        if gp_pct < -0.03 or gv_pct < -0.04:
+            # Identify dominant driver
+            pp_b = d.get('pp_B', 0)
+            pp_cogs = d.get('pp_cogs', 0)
+            pp_price = d.get('pp_price', 0)
+            pp_vm = d.get('pp_volmix', 0)
+            pp_g = d.get('pp_G', 0)
+            pp_existing = pp_cogs + pp_price + pp_vm
 
-def gradient_color(val, vmax):
-    """Return CSS background+text color for gradient red-white-green."""
-    if pd.isna(val): return ''
-    if vmax == 0: return ''
-    norm = max(-1, min(1, val / vmax))
-    if norm > 0:
-        alpha = norm
-        r = int(255 - (255-22) * alpha)
-        g = int(255 - (255-163) * alpha)
-        b = int(255 - (255-74) * alpha)
-        return f'background-color: rgb({r},{g},{b}); color: #111827;'
-    elif norm < 0:
-        alpha = -norm
-        r = int(255 - (255-220) * alpha)
-        g = int(255 - (255-38) * alpha)
-        b = int(255 - (255-38) * alpha)
-        text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
-        return f'background-color: rgb({r},{g},{b}); color: {text_color};'
-    return ''
+            # Rp components
+            rp_existing = d.get('cogs_rp', 0) + d.get('price_rp', 0) + d.get('volmix_rp', 0)
+            volmix_rp = d.get('volmix_rp', 0)
 
+            drivers = []
+            if abs(volmix_rp) > 30e6 and volmix_rp < 0:
+                drivers.append(f"Vol/Mix drag {fmt_rp(volmix_rp)} Rp")
+            if gv_pct < -0.03:
+                drivers.append(f"GV drop {gv_pct*100:.1f}%")
 
-def make_template_pi_excel():
-    """Generate a template Excel with required columns."""
-    from openpyxl import Workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Raw Input Template"
+            anomalies.append({
+                'bl': bl,
+                'gp_pct': gp_pct,
+                'gp_diff': gp_diff,
+                'gv_pct': gv_pct,
+                'drivers': drivers,
+            })
+    return anomalies
 
-    headers = ['week_key', 'next_week'] + REQUIRED_COLS
-    for c, h in enumerate(headers, 1):
-        ws.cell(1, c, h)
-
-    # Add note
-    ws.cell(3, 1, "Note: Required period cols: 'week_key' + 'next_week' OR 'month_key' + 'next_month'")
-    ws.cell(4, 1, "All numeric cols (price, cogs, comp_price, normal_comp_price, pi) bisa NaN untuk New/Departing SKU.")
-
-    out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TORNADO CHART (Zone 3)
-# ─────────────────────────────────────────────────────────────────────────────
-def make_pi_tornado(decomp_dict, scope_label='Overall'):
+def get_bridge_steps(pvm, scope, mode):
     """
-    Tornado horizontal bar chart of 5 PI effect components.
-    Components: eff_dep (Churned), eff_price, eff_normal_comp, eff_discount_comp, eff_new.
+    Get bridge step values per scope (TOTAL/Dry/Fresh/Frozen/PL).
+    mode: 'rp' (Rupiah), 'pp' (margin points × 100), 'pct' (growth % of GP_p1)
+    Returns dict: {label: value, ...} for 5 effect steps.
     """
-    components = [
-        ('1. Churned SKU Effect', decomp_dict['eff_dep']),
-        ('2. Price Change Effect',       decomp_dict['eff_price']),
-        ('3.1 Normal Comp Price Effect', decomp_dict['eff_normal_comp']),
-        ('3.2 Discount (Blended) Comp Price Effect', decomp_dict['eff_discount_comp']),
-        ('4. New SKU Effect',     decomp_dict['eff_new']),
-    ]
-    # Sort by magnitude desc
-    sorted_comp = sorted(components, key=lambda x: abs(x[1]), reverse=True)
-    labels = [c[0] for c in sorted_comp][::-1]
-    values = [c[1] for c in sorted_comp][::-1]
+    d = pvm[scope]
+    if mode == 'rp':
+        return {
+            '1. Churned SKU Effect': -d['gp_dep'],
+            '2.1 COGS Effect': d['cogs_rp'],
+            '2.2 Price Effect': d['price_rp'],
+            '2.3 Vol/Mix Effect': d['volmix_rp'],
+            '3. New SKU Effect': d['gp_new'],
+        }
+    elif mode == 'pp':
+        return {
+            '1. Churned SKU Effect': d['pp_B'] * 100,
+            '2.1 COGS Effect': d['pp_cogs'] * 100,
+            '2.2 Price Effect': d['pp_price'] * 100,
+            '2.3 Vol/Mix Effect': d['pp_volmix'] * 100,
+            '3. New SKU Effect': d['pp_G'] * 100,
+        }
+    else:  # pct (growth %)
+        gp_p1 = d['gp_start'] if d['gp_start'] else 1
+        return {
+            '1. Churned SKU Effect': (-d['gp_dep']) / gp_p1 * 100,
+            '2.1 COGS Effect': d['cogs_rp'] / gp_p1 * 100,
+            '2.2 Price Effect': d['price_rp'] / gp_p1 * 100,
+            '2.3 Vol/Mix Effect': d['volmix_rp'] / gp_p1 * 100,
+            '3. New SKU Effect': d['gp_new'] / gp_p1 * 100,
+        }
+
+
+def fmt_bridge_value(v, mode):
+    """Format value with appropriate unit."""
+    if mode == 'rp':
+        return fmt_rp(v)
+    elif mode == 'pp':
+        return f"{v:+.3f}pp"
+    else:  # pct
+        return f"{v:+.2f}%"
+
+
+def make_tornado_chart(pvm, scope='TOTAL', mode='rp'):
+    """
+    Horizontal tornado/diverging bar chart, sorted by impact magnitude.
+    Centered at 0, positive (green) right, negative (red) left.
+    """
+    steps = get_bridge_steps(pvm, scope, mode)
+    # Sort by absolute magnitude descending
+    sorted_steps = sorted(steps.items(), key=lambda x: abs(x[1]), reverse=True)
+    labels = [s[0] for s in sorted_steps]
+    values = [s[1] for s in sorted_steps]
     colors = ['#059669' if v >= 0 else '#DC2626' for v in values]
-    text_vals = [f"{v:+.3f}" for v in values]
+    text_vals = [fmt_bridge_value(v, mode) for v in values]
 
-    total = decomp_dict.get('total', sum(c[1] for c in components))
+    # Reverse so largest is on top
+    labels = labels[::-1]
+    values = values[::-1]
+    colors = colors[::-1]
+    text_vals = text_vals[::-1]
+
+    unit_label = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'GP Growth %'}[mode]
 
     fig = go.Figure(go.Bar(
         x=values,
@@ -211,136 +268,444 @@ def make_pi_tornado(decomp_dict, scope_label='Overall'):
         textposition='outside',
         cliponaxis=False,
     ))
+
+    # Total summary for title
+    d = pvm[scope]
+    if mode == 'rp':
+        total_str = fmt_rp(d['gp_end'] - d['gp_start'])
+        existing = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
+        existing_str = fmt_rp(existing)
+    elif mode == 'pp':
+        total_str = f"{d['pp_total']*100:+.3f}pp"
+        existing = (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100
+        existing_str = f"{existing:+.3f}pp"
+    else:
+        gp_p1 = d['gp_start'] if d['gp_start'] else 1
+        total_str = f"{(d['gp_end']-d['gp_start'])/gp_p1*100:+.2f}%"
+        existing = (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp_p1 * 100
+        existing_str = f"{existing:+.2f}%"
+
     fig.update_layout(
-        title=f"PI Movement Decomposition — {scope_label}  |  Total Δ: {total:+.3f} (A={decomp_dict['A']:.2f} → E={decomp_dict['E']:.2f})",
+        title=f"Tornado — {scope} ({unit_label})  |  Total: {total_str}  |  2. Existing SKU Effect: {existing_str}",
         showlegend=False,
         height=420,
         margin=dict(l=20, r=80, t=60, b=40),
-        xaxis_title='PI points',
+        xaxis_title=unit_label,
         plot_bgcolor='white',
         bargap=0.35,
     )
-    fig.update_xaxes(showgrid=True, gridcolor='#F3F4F6', zeroline=True,
-                     zerolinecolor='#9CA3AF', zerolinewidth=2)
+    fig.update_xaxes(showgrid=True, gridcolor='#F3F4F6', zeroline=True, zerolinecolor='#9CA3AF', zerolinewidth=2)
     fig.update_yaxes(showgrid=False)
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Tabel PI Decomposition per Scope (Zone 3 Tabel)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pi_decomp_table(overall, segments, contribs):
+def build_margin_pp_bridge_df(pvm, mode='pp'):
     """
-    Tabel 1: Per-segment PI decomposition with overall column.
-    Methodology mirrors Sheet 2 in Excel output.
-    Rows: A baseline, 5 effect components, E result, Total Δ.
-    Cols: Overall, Dry, Fresh, Frozen.
+    Tabel 1B style Sheet 2 — Margin Bridge per BL.
+    mode:
+      - 'pp' (default): Margin pp per BL. Start/End rows show absolute margin %.
+      - 'rp': Rupiah. Start/End rows show GP P1 / GP P2 (Rupiah). Effect rows show Rp.
+      - 'pct': Growth %. Start/End rows show '—' (no growth concept for absolute baseline)
+               and add 'GP P1 → P2' summary; effect rows show step_Rp / GP_P1 × 100%.
     """
+    bls = ['Dry', 'Fresh', 'Frozen', 'PL', 'TOTAL']
     rows = []
-    rows.append({
-        'Step': 'Baseline — Avg PI Prev (A)',
-        'Overall': overall['A'],
-        'Dry':     segments['Dry']['A'],
-        'Fresh':   segments['Fresh']['A'],
-        'Frozen':  segments['Frozen']['A'],
-    })
-    for label, key in [
-        ('+ 1. Churned SKU Effect',          'eff_dep'),
-        ('+ 2. Price Change Effect',         'eff_price'),
-        ('+ 3. Comp Price Effect',  'eff_comp'),
-        ('    3.1 Normal Comp Price Effect',       'eff_normal_comp'),
-        ('    3.2 Discount (Blended) Comp Price Effect', 'eff_discount_comp'),
-        ('+ 4. New SKU Effect',              'eff_new'),
-    ]:
-        rows.append({
-            'Step': label,
-            'Overall': overall[key],
-            'Dry':     segments['Dry'][key],
-            'Fresh':   segments['Fresh'][key],
-            'Frozen':  segments['Frozen'][key],
-        })
-    rows.append({
-        'Step': 'Result — Avg PI Cur (E)',
-        'Overall': overall['E'],
-        'Dry':     segments['Dry']['E'],
-        'Fresh':   segments['Fresh']['E'],
-        'Frozen':  segments['Frozen']['E'],
-    })
-    rows.append({
-        'Step': 'Total Δ',
-        'Overall': overall['total'],
-        'Dry':     segments['Dry']['total'],
-        'Fresh':   segments['Fresh']['total'],
-        'Frozen':  segments['Frozen']['total'],
-    })
-    return pd.DataFrame(rows)
+
+    if mode == 'pp':
+        rows.append(['Margin P1 — Start (all SKU)'] +
+                    [pvm[bl]['m_base'] * 100 for bl in bls] +
+                    ['GV P1 all'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [pvm[bl]['pp_B'] * 100 for bl in bls] +
+                    ['GV existing P1'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [(pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']) * 100 for bl in bls] +
+                    ['Sum of 2.1+2.2+2.3'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [pvm[bl]['pp_cogs'] * 100 for bl in bls] +
+                    ['GV_hyp1 = q1×p1'])
+        rows.append(['  2.2 Price Effect'] +
+                    [pvm[bl]['pp_price'] * 100 for bl in bls] +
+                    ['GV_hyp2 = q1×p2'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [pvm[bl]['pp_volmix'] * 100 for bl in bls] +
+                    ['GV actual existing P2'])
+        rows.append(['3. New SKU Effect'] +
+                    [pvm[bl]['pp_G'] * 100 for bl in bls] +
+                    ['GV P2 all'])
+        rows.append(['Total Margin Change'] +
+                    [pvm[bl]['pp_total'] * 100 for bl in bls] +
+                    ['End - Start'])
+        rows.append(['Margin P2 — End (all SKU)'] +
+                    [pvm[bl]['m_end'] * 100 for bl in bls] +
+                    ['GV P2 all'])
+    elif mode == 'rp':
+        rows.append(['GP P1 — Start (all SKU)'] +
+                    [pvm[bl]['gp_start'] for bl in bls] +
+                    ['GP P1 all'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [-pvm[bl]['gp_dep'] for bl in bls] +
+                    ['Removed SKU P1 GP'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [pvm[bl]['cogs_rp'] + pvm[bl]['price_rp'] + pvm[bl]['volmix_rp'] for bl in bls] +
+                    ['Sum of 2.1+2.2+2.3'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [pvm[bl]['cogs_rp'] for bl in bls] +
+                    ['q1 × (c1 - c2)'])
+        rows.append(['  2.2 Price Effect'] +
+                    [pvm[bl]['price_rp'] for bl in bls] +
+                    ['q1 × (p2 - p1)'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [pvm[bl]['volmix_rp'] for bl in bls] +
+                    ['(q2-q1) × (p2-c2)'])
+        rows.append(['3. New SKU Effect'] +
+                    [pvm[bl]['gp_new'] for bl in bls] +
+                    ['New SKU P2 GP'])
+        rows.append(['Total GP Change'] +
+                    [pvm[bl]['gp_end'] - pvm[bl]['gp_start'] for bl in bls] +
+                    ['End - Start'])
+        rows.append(['GP P2 — End (all SKU)'] +
+                    [pvm[bl]['gp_end'] for bl in bls] +
+                    ['GP P2 all'])
+    else:  # pct (growth %)
+        def safe_div(num, den):
+            return num / den * 100 if den else 0
+
+        rows.append(['GP P1 — Start (all SKU)'] +
+                    [pvm[bl]['gp_start'] for bl in bls] +
+                    ['Baseline GP P1'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [safe_div(-pvm[bl]['gp_dep'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [safe_div(pvm[bl]['cogs_rp'] + pvm[bl]['price_rp'] + pvm[bl]['volmix_rp'],
+                             pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [safe_div(pvm[bl]['cogs_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.2 Price Effect'] +
+                    [safe_div(pvm[bl]['price_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [safe_div(pvm[bl]['volmix_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['3. New SKU Effect'] +
+                    [safe_div(pvm[bl]['gp_new'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['Total GP Growth %'] +
+                    [safe_div(pvm[bl]['gp_end'] - pvm[bl]['gp_start'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['(End - Start) / Start'])
+        rows.append(['GP P2 — End (all SKU)'] +
+                    [pvm[bl]['gp_end'] for bl in bls] +
+                    ['Ending GP P2'])
+
+    cols = ['Step', 'Dry', 'Fresh', 'Frozen', 'PL', 'Overall', 'Reference']
+    return pd.DataFrame(rows, columns=cols)
 
 
-def build_pi_contrib_table(overall, contribs):
+def build_bl_contribution_df(pvm):
     """
-    Tabel 2: Per-segment contribution to OVERALL effect (exact math identity).
-    Each cell = exact_contributions formula. Sum across segments = overall (exact).
+    Tabel 2 — BL Contribution to Overall margin change.
+    Methodology (matches Sheet 2 Tabel 3 in pvm_analyzer_v3.py):
+      Per-effect contribution per BL = pp_step_BL × GV_weight_P2_BL
+      Σ Margin Change (via components) = sum of per-effect contributions
+      Margin Change Effect (direct) = ΔMargin_BL × GV_weight_P2_BL
+      Residual = (Σ via components) - (direct) ≈ 0
+      BL Mix Effect = ΔWeight_BL × Margin_P1_BL
+      Total Overall = Margin Change (direct) + BL Mix Effect = Actual Overall ΔMargin (exact identity)
+
+    Rows: 1. Churned, 2. Existing (sum), 2.1 COGS, 2.2 Price, 2.3 Vol/Mix, 3. New SKU,
+          Σ Margin Change Effect (via components), Margin Change Effect (direct),
+          Residual (via - direct), BL Mix Effect, Total Overall.
+    Cols: Dry contrib, Fresh contrib, Frozen contrib, PL contrib, Overall.
     """
+    bls = ['Dry', 'Fresh', 'Frozen', 'PL']
+    total_gv_p1 = sum(pvm[bl]['gv_start'] for bl in bls)
+    total_gv_p2 = sum(pvm[bl]['gv_end'] for bl in bls)
+    weights_p1 = {bl: pvm[bl]['gv_start'] / total_gv_p1 if total_gv_p1 else 0 for bl in bls}
+    weights_p2 = {bl: pvm[bl]['gv_end'] / total_gv_p2 if total_gv_p2 else 0 for bl in bls}
+
     rows = []
-    for label, key in [
-        ('1. Churned SKU Effect',                  'eff_dep'),
-        ('2. Price Change Effect',                 'eff_price'),
-        ('3. Comp Price Effect',          'eff_comp'),
-        ('  3.1 Normal Comp Price Effect',               'eff_normal_comp'),
-        ('  3.2 Discount (Blended) Comp Price Effect',   'eff_discount_comp'),
-        ('4. New SKU Effect',                      'eff_new'),
-    ]:
-        rows.append({
-            'Effect': label,
-            'Dry contrib':    contribs['Dry'][key],
-            'Fresh contrib':  contribs['Fresh'][key],
-            'Frozen contrib': contribs['Frozen'][key],
-            'Overall (sum)':  contribs['Dry'][key] + contribs['Fresh'][key] + contribs['Frozen'][key],
-            'Overall actual': overall[key],
-        })
-    return pd.DataFrame(rows)
+    steps = [
+        ('1. Churned SKU Effect', 'pp_B'),
+        ('2. Existing SKU Effect', '__existing__'),
+        ('  2.1 COGS Effect', 'pp_cogs'),
+        ('  2.2 Price Effect', 'pp_price'),
+        ('  2.3 Vol/Mix Effect', 'pp_volmix'),
+        ('3. New SKU Effect', 'pp_G'),
+    ]
+    # Per-effect contribution rows
+    for label, key in steps:
+        row = [label]
+        for bl in bls:
+            if key == '__existing__':
+                bl_pp = pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']
+            else:
+                bl_pp = pvm[bl][key]
+            contrib = bl_pp * weights_p2[bl] * 100
+            row.append(contrib)
+        row.append(sum(row[1:]))  # Overall = sum
+        rows.append(row)
+
+    # Σ Margin Change Effect (via components) = sum of 1.Churned + 2.Existing + 3.New per BL
+    sum_within_row = ['Σ Margin Change Effect (via components)']
+    for bl in bls:
+        v = (pvm[bl]['pp_B'] + pvm[bl]['pp_cogs'] + pvm[bl]['pp_price']
+             + pvm[bl]['pp_volmix'] + pvm[bl]['pp_G']) * weights_p2[bl] * 100
+        sum_within_row.append(v)
+    sum_within_row.append(sum(sum_within_row[1:]))
+    rows.append(sum_within_row)
+
+    # Margin Change Effect (direct) = ΔMargin_BL × weight_P2_BL
+    direct_row = ['Margin Change Effect (direct)']
+    for bl in bls:
+        v = pvm[bl]['pp_total'] * weights_p2[bl] * 100
+        direct_row.append(v)
+    direct_row.append(sum(direct_row[1:]))
+    rows.append(direct_row)
+
+    # Residual = via - direct (should be ~0)
+    residual_row = ['Residual (via comp - direct)']
+    for i, bl in enumerate(bls, 1):
+        residual_row.append(sum_within_row[i] - direct_row[i])
+    residual_row.append(sum(residual_row[1:]))
+    rows.append(residual_row)
+
+    # BL Mix Effect = ΔWeight_BL × Margin_P1_BL
+    blmix_row = ['BL Mix Effect']
+    for bl in bls:
+        delta_w = weights_p2[bl] - weights_p1[bl]
+        m_p1 = pvm[bl]['m_base']
+        v = delta_w * m_p1 * 100
+        blmix_row.append(v)
+    blmix_row.append(sum(blmix_row[1:]))
+    rows.append(blmix_row)
+
+    # Total Overall = Margin Change (direct) + BL Mix
+    total_row = ['Total Overall']
+    for i in range(1, 5):  # per BL: leave blank as concept doesn't apply per-BL
+        total_row.append(None)
+    total_row.append(direct_row[5] + blmix_row[5])
+    rows.append(total_row)
+
+    cols = ['Step', 'Dry contrib', 'Fresh contrib', 'Frozen contrib', 'PL contrib', 'Overall']
+    return pd.DataFrame(rows, columns=cols)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: L1 Decomposition (Zone 4)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_l1_pi_table(df, scope='Overall'):
+
+def compute_l1_breakdown(df):
+    """Aggregate GP P1, GP P2, GP Diff per L1 category."""
+    g = df.groupby(['pricing_bl', 'l1_category'], dropna=False).agg(
+        gp_p1=('gp_p1', 'sum'),
+        gp_p2=('gp_p2', 'sum'),
+        gv_p1=('gv_p1', 'sum'),
+        gv_p2=('gv_p2', 'sum'),
+        qty_p1=('qty_p1', 'sum'),
+        qty_p2=('qty_p2', 'sum'),
+        n_sku=('product_id', 'nunique') if 'product_id' in df.columns else ('gp_p1', 'count'),
+    ).reset_index()
+    g['gp_diff'] = g['gp_p2'] - g['gp_p1']
+    g['gp_diff_pct'] = np.where(g['gp_p1'] != 0, g['gp_diff'] / g['gp_p1'], np.nan)
+    g['margin_p1'] = np.where(g['gv_p1'] != 0, g['gp_p1'] / g['gv_p1'], np.nan)
+    g['margin_p2'] = np.where(g['gv_p2'] != 0, g['gp_p2'] / g['gv_p2'], np.nan)
+    g['margin_diff'] = g['margin_p2'] - g['margin_p1']
+    g = g.sort_values('gp_diff', ascending=False).reset_index(drop=True)
+    return g
+
+
+def compute_l1_pvm(df, scope='TOTAL'):
     """
-    For each L1 category, run decompose() and return table.
-    scope: 'Overall' = all SKU, else filter by BL (Dry/Fresh/Frozen).
+    Compute PVM decomposition per L1 category, optionally filtered by BL scope.
+    Returns dict of L1 -> {effect components}.
+    Components per L1:
+      gp_dep, cogs_rp, price_rp, volmix_rp, gp_new, gp_start, gp_end
+      m_base, m_end, pp_B, pp_cogs, pp_price, pp_volmix, pp_G, pp_total
     """
-    from pi_analyzer_v1 import decompose
-
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
+    if scope != 'TOTAL':
+        df_scope = df[df['pricing_bl'] == scope].copy()
     else:
         df_scope = df.copy()
 
-    if 'l1_category_name' not in df_scope.columns or len(df_scope) == 0:
-        return pd.DataFrame()
+    if 'l1_category' not in df_scope.columns:
+        return {}
 
-    rows = []
-    for l1, g in df_scope.groupby('l1_category_name', dropna=False):
+    l1_data = {}
+    for l1, g in df_scope.groupby('l1_category', dropna=False):
         if pd.isna(l1):
             continue
-        r = decompose(g)
-        ex_sub = g[g['sku_type'] == 'Existing']
-        rows.append({
-            'L1 Category': l1,
-            'BL (sample)': g['pricing_bl_25'].iloc[0] if 'pricing_bl_25' in g.columns else '—',
-            'n Existing':  r['n_ex'],
-            'n Departing': r['n_dep'],
-            'n New':       r['n_new'],
-            'Avg PI Prev (A)': r['A'],
-            'Avg PI Cur (E)':  r['E'],
-            'Total Δ':         r['total'],
-            '1. Churned Eff':  r['eff_dep'],
-            '2. Price Eff':    r['eff_price'],
-            '3. Comp Price Eff':     r['eff_comp'],
-            '3.1 Normal Comp Eff': r['eff_normal_comp'],
-            '3.2 Discount Comp Eff': r['eff_discount_comp'],
-            '4. New SKU Eff':      r['eff_new'],
-        })
+
+        # Split by status
+        if 'sku_status' in g.columns:
+            ex = g[g['sku_status'] == 'Existing']
+            new = g[g['sku_status'] == 'New']
+            dep = g[g['sku_status'] == 'Deprecated']
+        else:
+            ex = g; new = g.iloc[0:0]; dep = g.iloc[0:0]
+
+        # Aggregates
+        gv_ex1 = ex['gv_p1'].sum()
+        gv_ex2 = ex['gv_p2'].sum()
+        gp_ex1 = ex['gp_p1'].sum()
+        gp_ex2 = ex['gp_p2'].sum()
+        gv_dep = dep['gv_p1'].sum()
+        gp_dep_val = dep['gp_p1'].sum()
+        gv_new_val = new['gv_p2'].sum()
+        gp_new_val = new['gp_p2'].sum()
+
+        gp_start = gp_ex1 + gp_dep_val
+        gp_end = gp_ex2 + gp_new_val
+        gv_start = gv_ex1 + gv_dep
+        gv_end = gv_ex2 + gv_new_val
+
+        # Existing-only PVM
+        q1 = ex['qty_p1'].fillna(0)
+        q2 = ex['qty_p2'].fillna(0)
+        p1 = ex['price_p1'].fillna(0)
+        p2 = ex['price_p2'].fillna(0)
+        c1 = ex['cogs_p1'].fillna(0)
+        c2 = ex['cogs_p2'].fillna(0)
+
+        cogs_rp = (q1 * (c1 - c2)).sum()
+        price_rp = (q1 * (p2 - p1)).sum()
+        volmix_rp = ((q2 - q1) * (p2 - c2)).sum()
+
+        # Margin pp decomposition (vs gv_ex_p1 for COGS/Price, vs gv_ex_p2 for Vol/Mix)
+        m_base = gp_start / gv_start if gv_start else 0
+        m_end = gp_end / gv_end if gv_end else 0
+        m_ex1 = gp_ex1 / gv_ex1 if gv_ex1 else 0
+        m_ex2 = gp_ex2 / gv_ex2 if gv_ex2 else 0
+        gp_h1 = gv_ex1 - (q1 * c2).sum() if gv_ex1 else 0
+        gp_h2 = (q1 * p2).sum() - (q1 * c2).sum() if gv_ex1 else 0
+        gv_h2 = (q1 * p2).sum()
+        m_h1 = gp_h1 / gv_ex1 if gv_ex1 else 0
+        m_h2 = gp_h2 / gv_h2 if gv_h2 else 0
+
+        pp_B = m_ex1 - m_base
+        pp_cogs = m_h1 - m_ex1
+        pp_price = m_h2 - m_h1
+        pp_volmix = m_ex2 - m_h2
+        pp_G = m_end - m_ex2
+
+        l1_data[l1] = {
+            'pricing_bl': g['pricing_bl'].iloc[0] if 'pricing_bl' in g.columns else None,
+            'gv_start': gv_start, 'gv_end': gv_end,
+            'gp_start': gp_start, 'gp_end': gp_end,
+            'gp_dep': gp_dep_val, 'gp_new': gp_new_val,
+            'cogs_rp': cogs_rp, 'price_rp': price_rp, 'volmix_rp': volmix_rp,
+            'm_base': m_base, 'm_end': m_end,
+            'pp_B': pp_B, 'pp_cogs': pp_cogs, 'pp_price': pp_price,
+            'pp_volmix': pp_volmix, 'pp_G': pp_G,
+            'pp_total': pp_B + pp_cogs + pp_price + pp_volmix + pp_G,
+        }
+    return l1_data
+
+
+def build_l1_decomp_df(df, scope='TOTAL', mode='rp'):
+    """
+    Tabel L1 PVM Decomposition — L1 effect breakdown per scope, dengan kolom kontekstual.
+
+    Layout per mode:
+      - 'rp': L1 | BL | GP P1 | GV Weight P1 | [effects in Rp] | Total Δ | GP P2 | GV Weight P2
+      - 'pct': L1 | BL | GP P1 | GV Weight P1 | [effects in growth%] | Total Δ | GP P2 | GV Weight P2
+      - 'pp': L1 | BL | Margin P1 | GV Weight P1 | [effects in pp within L1] | Total Δ | Margin P2 | GV Weight P2
+      - 'pp_contrib': L1 | BL | Margin P1 | GV Weight P1 | [effects in pp×weight] | Margin Change Effect | GV Weight Effect | Total Δ | Margin P2 | GV Weight P2
+
+    GV Weight = L1_GV / scope_total_GV (terhadap scope yang dipilih).
+
+    Math identity untuk pp_contrib mode:
+      Margin Change Effect_L1 = pp_total_L1 × weight_P2_L1_in_scope
+      GV Weight Effect_L1 = ΔWeight_L1_in_scope × Margin_P1_L1
+      Total Δ_L1 = Margin Change + GV Weight
+      Σ across L1 in scope = scope's actual ΔMargin (exact)
+    """
+    l1_data = compute_l1_pvm(df, scope=scope)
+    if not l1_data:
+        return pd.DataFrame()
+
+    # Scope-level GV totals (for weighting)
+    total_gv_p1 = sum(d['gv_start'] for d in l1_data.values())
+    total_gv_p2 = sum(d['gv_end'] for d in l1_data.values())
+
+    rows = []
+    for l1, d in l1_data.items():
+        bl = d['pricing_bl']
+        w_p1 = d['gv_start'] / total_gv_p1 if total_gv_p1 else 0
+        w_p2 = d['gv_end'] / total_gv_p2 if total_gv_p2 else 0
+
+        if mode == 'rp':
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'GP P1': d['gp_start'],
+                'GV Weight P1': w_p1,
+                '1. Churned': -d['gp_dep'],
+                '2. Existing': d['cogs_rp'] + d['price_rp'] + d['volmix_rp'],
+                '  2.1 COGS': d['cogs_rp'],
+                '  2.2 Price': d['price_rp'],
+                '  2.3 Vol/Mix': d['volmix_rp'],
+                '3. New': d['gp_new'],
+                'Total Δ': d['gp_end'] - d['gp_start'],
+                'GP P2': d['gp_end'],
+                'GV Weight P2': w_p2,
+            }
+        elif mode == 'pct':
+            gp1 = d['gp_start'] if d['gp_start'] else 1
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'GP P1': d['gp_start'],
+                'GV Weight P1': w_p1,
+                '1. Churned': (-d['gp_dep']) / gp1 * 100,
+                '2. Existing': (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp1 * 100,
+                '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
+                '  2.2 Price': d['price_rp'] / gp1 * 100,
+                '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
+                '3. New': d['gp_new'] / gp1 * 100,
+                'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
+                'GP P2': d['gp_end'],
+                'GV Weight P2': w_p2,
+            }
+        elif mode == 'pp':
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': w_p1,
+                '1. Churned': d['pp_B'] * 100,
+                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
+                '  2.1 COGS': d['pp_cogs'] * 100,
+                '  2.2 Price': d['pp_price'] * 100,
+                '  2.3 Vol/Mix': d['pp_volmix'] * 100,
+                '3. New': d['pp_G'] * 100,
+                'Total Δ': d['pp_total'] * 100,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': w_p2,
+            }
+        else:  # pp_contrib
+            delta_w = w_p2 - w_p1
+            churned_c = d['pp_B'] * w_p2 * 100
+            cogs_c = d['pp_cogs'] * w_p2 * 100
+            price_c = d['pp_price'] * w_p2 * 100
+            volmix_c = d['pp_volmix'] * w_p2 * 100
+            new_c = d['pp_G'] * w_p2 * 100
+            existing_c = cogs_c + price_c + volmix_c
+            margin_change_total = churned_c + existing_c + new_c  # = pp_total × w_p2 × 100
+            gv_weight_effect = delta_w * d['m_base'] * 100
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': w_p1,
+                '1. Churned': churned_c,
+                '2. Existing': existing_c,
+                '  2.1 COGS': cogs_c,
+                '  2.2 Price': price_c,
+                '  2.3 Vol/Mix': volmix_c,
+                '3. New': new_c,
+                'Margin Change Effect': margin_change_total,
+                'GV Weight Effect': gv_weight_effect,
+                'Total Δ': margin_change_total + gv_weight_effect,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': w_p2,
+            }
+        rows.append(row)
 
     out = pd.DataFrame(rows)
     if not out.empty:
@@ -348,268 +713,232 @@ def build_l1_pi_table(df, scope='Overall'):
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Pareto Decomposition (Zone 11)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pareto_pi_table(df, scope='Overall'):
-    """Same structure as L1 but dimension = pareto_classification."""
-    from pi_analyzer_v1 import decompose
-
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
-    else:
-        df_scope = df.copy()
-
-    if 'pareto_classification' not in df_scope.columns or len(df_scope) == 0:
-        return pd.DataFrame()
-
-    rows = []
-    for pareto, g in df_scope.groupby('pareto_classification', dropna=False):
-        if pd.isna(pareto):
-            continue
-        r = decompose(g)
-        rows.append({
-            'Pareto Class':    pareto,
-            'n Existing':      r['n_ex'],
-            'n Departing':     r['n_dep'],
-            'n New':           r['n_new'],
-            'Avg PI Prev (A)': r['A'],
-            'Avg PI Cur (E)':  r['E'],
-            'Total Δ':         r['total'],
-            '1. Churned Eff':  r['eff_dep'],
-            '2. Price Eff':    r['eff_price'],
-            '3. Comp Price Eff':     r['eff_comp'],
-            '3.1 Normal Comp Eff': r['eff_normal_comp'],
-            '3.2 Discount Comp Eff': r['eff_discount_comp'],
-            '4. New SKU Eff':      r['eff_new'],
-        })
-
-    out = pd.DataFrame(rows)
-    if not out.empty:
-        out = out.sort_values('Pareto Class').reset_index(drop=True)
-    return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Price × Comp Matrix (Zone 5)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_price_comp_matrix(df, scope='Overall'):
+def build_l1_overall_row(df, scope, mode, pvm):
     """
-    3×3 matrix: rows = price_tag (Down/Stay/Up), cols = comp_tag (Down/Stay/Up).
-    Cells = count of Existing SKU.
+    Build single 'Overall' row for Tabel L1 (placed at bottom).
+
+    Sum-able modes (rp, pp_contrib):
+      Row Overall = sum of all L1 (column-wise sum) — exact match with scope's actual total
+
+    Non-sum-able modes (pct, pp):
+      Row Overall = scope-level aggregate (compute fresh, NOT sum of L1)
+      Reason: growth%/margin pp are non-linear (denominator-dependent), sum-of-L1 != scope-level
     """
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
+    scope_data = pvm.get(scope) if scope != 'TOTAL' else pvm.get('TOTAL')
+    if not scope_data:
+        return None
+
+    if mode in ('rp', 'pp_contrib'):
+        # Sum-able: compute fresh from compute_l1_pvm and sum columns
+        ldf = build_l1_decomp_df(df, scope=scope, mode=mode)
+        if ldf.empty:
+            return None
+        overall = {'L1 Category': 'OVERALL (Sum L1)', 'BL': '—'}
+        for col in ldf.columns:
+            if col in ('L1 Category', 'BL'): continue
+            if col in ('GV Weight P1', 'GV Weight P2'):
+                overall[col] = 1.0  # 100% by definition of scope
+            elif col in ('GP P1', 'GP P2', 'Margin P1', 'Margin P2'):
+                # Show scope-level absolute baseline
+                if col == 'GP P1':
+                    overall[col] = scope_data['gp_start']
+                elif col == 'GP P2':
+                    overall[col] = scope_data['gp_end']
+                elif col == 'Margin P1':
+                    overall[col] = scope_data['m_base'] * 100
+                elif col == 'Margin P2':
+                    overall[col] = scope_data['m_end'] * 100
+            else:
+                overall[col] = ldf[col].sum()
+        return overall
+    else:  # pct, pp — non-sum-able, compute scope-level fresh
+        d = scope_data
+        if mode == 'pct':
+            gp1 = d['gp_start'] if d['gp_start'] else 1
+            existing_rp = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
+            return {
+                'L1 Category': 'OVERALL (Scope-level)', 'BL': '—',
+                'GP P1': d['gp_start'],
+                'GV Weight P1': 1.0,
+                '1. Churned': (-d['gp_dep']) / gp1 * 100,
+                '2. Existing': existing_rp / gp1 * 100,
+                '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
+                '  2.2 Price': d['price_rp'] / gp1 * 100,
+                '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
+                '3. New': d['gp_new'] / gp1 * 100,
+                'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
+                'GP P2': d['gp_end'],
+                'GV Weight P2': 1.0,
+            }
+        else:  # pp (within L1)
+            return {
+                'L1 Category': 'OVERALL (Scope-level)', 'BL': '—',
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': 1.0,
+                '1. Churned': d['pp_B'] * 100,
+                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
+                '  2.1 COGS': d['pp_cogs'] * 100,
+                '  2.2 Price': d['pp_price'] * 100,
+                '  2.3 Vol/Mix': d['pp_volmix'] * 100,
+                '3. New': d['pp_G'] * 100,
+                'Total Δ': d['pp_total'] * 100,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': 1.0,
+            }
+
+
+
+def _enrich_existing_with_effects(df):
+    """
+    Filter to Existing SKU only and add per-SKU decomposition + Δ Rp columns.
+    Returns enriched DataFrame.
+    """
+    if 'sku_status' in df.columns:
+        existing = df[df['sku_status'] == 'Existing'].copy()
     else:
-        df_scope = df.copy()
+        existing = df.copy()
+    existing = existing.dropna(subset=['gp_diff'])
 
-    ex = df_scope[df_scope['sku_type'] == 'Existing']
-    if len(ex) == 0:
-        return None, None
+    # Per-SKU PVM decomposition
+    # COGS Effect_sku = q_p1 × (cogs_p1 - cogs_p2)   ← positive = COGS turun = bantu GP
+    # Price Effect_sku = q_p1 × (price_p2 - price_p1) ← positive = Price naik = bantu GP
+    # Vol/Mix Effect_sku = (q_p2 - q_p1) × (price_p2 - cogs_p2)  ← positive = qty naik
+    q1 = existing['qty_p1'].fillna(0)
+    q2 = existing['qty_p2'].fillna(0)
+    p1 = existing['price_p1'].fillna(0)
+    p2 = existing['price_p2'].fillna(0)
+    c1 = existing['cogs_p1'].fillna(0)
+    c2 = existing['cogs_p2'].fillna(0)
 
-    DIRS = ['Down', 'Stay', 'Up']
-    matrix = np.zeros((3, 3), dtype=int)
-    for ri, pr in enumerate(DIRS):
-        for ci, cr in enumerate(DIRS):
-            matrix[ri, ci] = int(((ex['price_tag'] == pr) & (ex['comp_tag'] == cr)).sum())
+    existing['cogs_effect'] = q1 * (c1 - c2)
+    existing['price_effect'] = q1 * (p2 - p1)
+    existing['volmix_effect'] = (q2 - q1) * (p2 - c2)
 
-    df_matrix = pd.DataFrame(
-        matrix,
-        index=[f'PRICE {d}' for d in DIRS],
-        columns=[f'COMP {d}' for d in DIRS],
-    )
-    return df_matrix, len(ex)
+    # Δ Rp (nominal per-unit changes)
+    existing['price_diff_rp'] = p2 - p1
+    existing['cogs_diff_rp'] = c2 - c1
 
+    # Per-SKU margin P1, P2 (unit margin)
+    existing['margin_p1_pct'] = np.where(p1 > 0, (p1 - c1) / p1 * 100, np.nan)
+    existing['margin_p2_pct'] = np.where(p2 > 0, (p2 - c2) / p2 * 100, np.nan)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: PI Distribution (Zone 6)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pi_distribution(df, scope='Overall'):
-    """PI bucket distribution Prev vs Cur. Existing SKU only."""
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
+    # Avg stock P1, P2 + growth %
+    if 'avg_stock_p1' in existing.columns and 'avg_stock_p2' in existing.columns:
+        s1 = existing['avg_stock_p1']
+        s2 = existing['avg_stock_p2']
+        existing['avg_stock_growth_pct'] = np.where(s1 > 0, (s2 - s1) / s1 * 100, np.nan)
     else:
-        df_scope = df.copy()
+        existing['avg_stock_p1'] = np.nan
+        existing['avg_stock_p2'] = np.nan
+        existing['avg_stock_growth_pct'] = np.nan
 
-    ex = df_scope[df_scope['sku_type'] == 'Existing']
-    n = len(ex)
-    if n == 0:
-        return pd.DataFrame()
+    # Growth % = sku_gp_diff / sku_gp_p1 (per-SKU growth)
+    gp1 = existing['gp_p1'].replace(0, np.nan)
+    existing['gp_growth_pct'] = (existing['gp_diff'] / gp1) * 100
 
-    rows = []
-    for lbl in PI_BINS_LBL:
-        nc = int((ex['pi_group_prev'].astype(str) == lbl).sum())
-        nn = int((ex['pi_group_cur'].astype(str) == lbl).sum())
-        rows.append({
-            'PI Bucket': lbl,
-            'n Prev':    nc,
-            'n Cur':     nn,
-            'Δ Count':   nn - nc,
-            '% Prev':    nc/n if n > 0 else 0,
-            '% Cur':     nn/n if n > 0 else 0,
-            'Δ %':       (nn - nc)/n if n > 0 else 0,
-        })
-    return pd.DataFrame(rows)
+    return existing
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Top Movers SKU (Zone 7)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_top_movers_pi(df, n=30):
-    """Top N gainers + losers by absolute |diff_pi|."""
-    ex = df[df['sku_type'] == 'Existing'].dropna(subset=['diff_pi']).copy()
-    if len(ex) == 0:
-        return pd.DataFrame(), pd.DataFrame()
-
-    gainers = ex.nlargest(n, 'diff_pi')
-    losers = ex.nsmallest(n, 'diff_pi')
+def compute_top_movers_gp(df, n=10):
+    """Top n by GP Δ — gainers (highest gp_diff) and losers (lowest)."""
+    existing = _enrich_existing_with_effects(df)
+    gainers = existing.nlargest(n, 'gp_diff')
+    losers = existing.nsmallest(n, 'gp_diff')
     return gainers, losers
 
 
-def fmt_mover_row(r, idx):
-    """Format single row for mover table display."""
-    pi_p1 = r.get('pi', np.nan)
-    pi_p2 = r.get('next_pi', np.nan)
-    mgn_p1 = r.get('margin_pct_prev', np.nan)
-    mgn_p2 = r.get('margin_pct_cur', np.nan)
-    return {
-        '#': idx,
-        'Product': str(r.get('product_name', '—'))[:35],
-        'BL': r.get('pricing_bl_25', '—'),
-        'L1': r.get('l1_category_name', '—'),
-        'PI P1 → P2': f"{pi_p1:.1f} → {pi_p2:.1f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—",
-        'Δ PI': r.get('diff_pi', 0),
-        'Price Eff': r.get('eff_price', 0),
-        'Comp Price Eff': r.get('eff_comp', 0),
-        'Normal Comp Eff': r.get('eff_normal_comp', 0),
-        'Discount Comp Eff': r.get('eff_discount_comp', 0),
-        'Mgn P1 → P2': f"{mgn_p1*100:.1f}% → {mgn_p2*100:.1f}%" if pd.notna(mgn_p1) and pd.notna(mgn_p2) else "—",
-        'Price Δ%': r.get('diff_price_pct', np.nan),
-        'COGS Δ%': r.get('diff_cogs_pct', np.nan),
-        'Framework': r.get('framework_check', '') or '',
-    }
+def compute_top_movers_price(df, n=10):
+    """Top n by Price Δ% — up (highest) and down (lowest)."""
+    existing = _enrich_existing_with_effects(df)
+    existing = existing.dropna(subset=['price_diff_pct'])
+    ups = existing.nlargest(n, 'price_diff_pct')
+    downs = existing.nsmallest(n, 'price_diff_pct')
+    return ups, downs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Framework Check (Zone 9)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_framework_check_table(df):
-    """Filter SKU where framework_check == 'TRUE' and classify by rule."""
-    fc = df[df['framework_check'] == 'TRUE'].copy()
-    if len(fc) == 0:
-        return pd.DataFrame()
-
-    # Classify rule based on conditions
-    def classify_rule(row):
-        bl = row.get('pricing_bl_25', '')
-        pi = row.get('next_pi', np.nan)
-        mg = row.get('margin_pct_cur', np.nan)
-        if pd.isna(pi) or pd.isna(mg):
-            return 'Unknown'
-        if bl == 'Fresh':
-            if pi > 110 and mg <= 0.15: return 'Rule 1: Fresh PI>110 + Margin≤15% (room to drop price)'
-            if pi > 120 and mg >= 0.70: return 'Rule 3: Fresh PI>120 + Margin≥70% (over-priced premium)'
-        elif bl == 'Frozen':
-            if pi > 100 and mg <= 0.15: return 'Rule 2: Frozen PI>100 + Margin≤15% (room to drop)'
-        elif bl == 'Dry':
-            if pi < 105 and mg <= 0.00: return 'Rule 4: Dry PI<105 + Margin≤0% (loss leader, raise)'
-            if pi > 120 and mg > 0.40: return 'Rule 5: Dry PI>120 + Margin>40% (over-priced, drop)'
-        return 'Other'
-
-    fc['Rule'] = fc.apply(classify_rule, axis=1)
-
-    cols = ['Rule', 'product_id', 'product_name', 'pricing_bl_25', 'l1_category_name',
-            'pi', 'next_pi', 'diff_pi', 'margin_pct_prev', 'margin_pct_cur',
-            'price', 'next_price', 'cogs', 'next_cogs', 'comp_price', 'next_comp_price']
-    cols = [c for c in cols if c in fc.columns]
-    out = fc[cols].sort_values(['Rule', 'next_pi'], ascending=[True, False]).reset_index(drop=True)
-    return out
+def compute_top_movers_cogs(df, n=10):
+    """Top n by COGS Δ% — up (highest) and down (lowest)."""
+    existing = _enrich_existing_with_effects(df)
+    existing = existing.dropna(subset=['cogs_diff_pct'])
+    ups = existing.nlargest(n, 'cogs_diff_pct')
+    downs = existing.nsmallest(n, 'cogs_diff_pct')
+    return ups, downs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Structural Loss (Zone 8a) + COGS Need Improve (Zone 8b)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_structural_loss(df):
-    """L1 categories with high CI Group D (95-105) or E (>105)."""
-    ex = df[df['ci_cur'].notna() & df['next_pi'].notna() & df['margin_pct_cur'].notna()].copy()
-    if len(ex) == 0:
-        return pd.DataFrame()
+def compute_top_movers(df, n=10):
+    """Backward compat alias for GP movers."""
+    return compute_top_movers_gp(df, n)
 
-    cat_total = ex.groupby('l1_category_name').size().to_dict()
-    rows = []
-    for grp_label, grp_filter in [
-        ('COGS Index D (95-105)', 'D.95-105'),
-        ('COGS Index E (>105)',   'E.>105'),
-    ]:
-        sub = ex[ex['ci_group_cur'] == grp_filter]
-        if len(sub) == 0:
-            continue
-        by_cat = sub.groupby('l1_category_name').agg(
-            n_sku=('product_id', 'count'),
-            avg_ci=('ci_cur', 'mean'),
-            avg_mg=('margin_pct_cur', 'mean'),
-            avg_pi=('next_pi', 'mean')
-        ).sort_values('n_sku', ascending=False).reset_index()
-        for _, row in by_cat.iterrows():
-            pct = row['n_sku'] / cat_total.get(row['l1_category_name'], 1)
-            rows.append({
-                'CI Group': grp_label,
-                'L1 Category': row['l1_category_name'],
-                'n SKU': int(row['n_sku']),
-                '% of Category': pct,
-                'Avg COGS Index': row['avg_ci'],
-                'Avg Margin %': row['avg_mg'],
-                'Avg PI (Cur)': row['avg_pi'],
-            })
+def compute_watch_priority(df):
+    """Find Priority SKUs: (Up,Up,Flat) or (Drop,Drop,Flat) on (cogs, comp, price)."""
+    if 'flag_price' in df.columns:
+        return df[df['flag_price'] == 'Priority'].copy()
+    # Fallback: compute from status cols
+    priority_mask = (
+        ((df.get('cogs_status') == 'Up') & (df.get('comp_status') == 'Up') & (df.get('price_status') == 'Flat')) |
+        ((df.get('cogs_status') == 'Drop') & (df.get('comp_status') == 'Drop') & (df.get('price_status') == 'Flat'))
+    )
+    return df[priority_mask].copy()
 
-    return pd.DataFrame(rows)
-
-
-def build_cogs_need_improve(df):
-    """SKU list with CI Group D or E. Sorted by CI desc."""
-    ex = df[df['ci_group_cur'].isin(['D.95-105', 'E.>105'])].copy()
-    if len(ex) == 0:
-        return pd.DataFrame()
-    ex = ex.sort_values('ci_cur', ascending=False)
-    cols = ['product_id', 'product_name', 'l1_category_name', 'pricing_bl_25',
-            'pareto_classification', 'sku_type',
-            'ci_group_cur', 'ci_cur', 'next_pi', 'margin_pct_cur',
-            'next_price', 'next_cogs', 'next_comp_price']
-    cols = [c for c in cols if c in ex.columns]
-    return ex[cols].reset_index(drop=True)
-
+def make_template_excel():
+    """Generate a downloadable template Excel with required cols and 2 sample rows."""
+    template = pd.DataFrame({
+        'week_key': ['2026-05-04', '2026-05-04'],
+        'next_week': ['2026-05-11', '2026-05-11'],
+        'product_id': ['SKU001', 'SKU002'],
+        'product_name': ['Sample Product A', 'Sample Product B'],
+        'pricing_bl_25': ['Dry', 'Fresh'],
+        'l1_category_name': ['Beverages', 'Dairy & Eggs'],
+        'business_lines_2025': ['Dry', 'Fresh'],
+        'pareto_classification': ['A', 'B'],
+        'selling_price': [10000, 25000],
+        'selling_price1': [10500, 25000],
+        'cost_price': [7000, 18000],
+        'cost_price1': [7100, 17500],
+        'qty': [120, 80],
+        'qty1': [130, 75],
+        'comp_price': [10200, 24500],
+        'comp_price1': [10300, 24800],
+        'pi': [98.04, 102.04],
+        'pi1': [101.94, 100.81],
+        'avg_stock': [200, 150],
+        'avg_stock1': [180, 160],
+    })
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        template.to_excel(writer, sheet_name='Sheet1', index=False)
+    buf.seek(0)
+    return buf.getvalue()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
-if 'pi_analysis' not in st.session_state:
-    st.session_state.pi_analysis = None
-if 'pi_uploaded_file_name' not in st.session_state:
-    st.session_state.pi_uploaded_file_name = None
-if 'pi_uploaded_file_size' not in st.session_state:
-    st.session_state.pi_uploaded_file_size = None
-
+if 'pvm_analysis' not in st.session_state:
+    st.session_state.pvm_analysis = None
+if 'pvm_uploaded_file_name' not in st.session_state:
+    st.session_state.pvm_uploaded_file_name = None
+if 'pvm_uploaded_file_size' not in st.session_state:
+    st.session_state.pvm_uploaded_file_size = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
 col_title, col_clear = st.columns([5, 1])
 with col_title:
-    st.title("📈 PI Analyzer")
-    st.caption("Pricing Index Movement Decomposition vs Competitor — Astro Pricing Strategy")
+    st.title("📊 PVM Analyzer")
+    st.caption("Pricing × Volume × Mix Decomposition — Astro Pricing Strategy")
 with col_clear:
     st.write("")
-    if st.session_state.pi_analysis is not None:
-        if st.button("🗑️ Clear data", type="secondary", use_container_width=True, key='pi_clear'):
-            st.session_state.pi_analysis = None
-            st.session_state.pi_uploaded_file_name = None
-            st.session_state.pi_uploaded_file_size = None
+    if st.session_state.pvm_analysis is not None:
+        if st.button("🗑️ Clear data", type="secondary", use_container_width=True):
+            st.session_state.pvm_analysis = None
+            st.session_state.pvm_uploaded_file_name = None
+            st.session_state.pvm_uploaded_file_size = None
             st.rerun()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 # ZONE 1 — UPLOAD
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">📁 Upload Data</div>', unsafe_allow_html=True)
 
 up_col1, up_col2 = st.columns([3, 1])
@@ -617,20 +946,19 @@ with up_col1:
     uploaded = st.file_uploader(
         "Upload file Excel atau CSV (raw input per-SKU per-periode)",
         type=['xlsx', 'xls', 'csv'],
-        help=f"Format mengikuti pi_analyzer_v1.py. Required columns: {', '.join(REQUIRED_COLS[:8])}...",
-        key='pi_uploader',
+        help="Format mengikuti pvm_analyzer_v3.py: butuh kolom selling_price, cost_price, qty (P1 & P2)",
     )
 with up_col2:
     st.write("")
     st.write("")
-    template_bytes = make_template_pi_excel()
+    template_bytes = make_template_excel()
     st.download_button(
         "📥 Download Template",
         data=template_bytes,
-        file_name="pi_template.xlsx",
+        file_name="pvm_template.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-        key='pi_template_download',
+        help="Download template Excel kosong dengan format kolom yang benar"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -638,12 +966,12 @@ with up_col2:
 # ─────────────────────────────────────────────────────────────────────────────
 file_changed = (
     uploaded is not None and
-    (st.session_state.pi_uploaded_file_name != uploaded.name or
-     st.session_state.pi_uploaded_file_size != uploaded.size or
-     st.session_state.pi_analysis is None)
+    (st.session_state.pvm_uploaded_file_name != uploaded.name or
+     st.session_state.pvm_uploaded_file_size != uploaded.size or
+     st.session_state.pvm_analysis is None)
 )
-
 if file_changed:
+    # Load file
     try:
         if uploaded.name.lower().endswith('.csv'):
             df_input = pd.read_csv(uploaded)
@@ -673,684 +1001,996 @@ if file_changed:
             try:
                 p1_val = str(df_input[period_pair[0]].dropna().iloc[0])[:10]
                 p2_val = str(df_input[period_pair[1]].dropna().iloc[0])[:10]
-                st.success(f"✅ Period: `{period_pair[0]}` ({p1_val}) vs `{period_pair[1]}` ({p2_val})")
+                st.success(f"✅ Period detected: `{period_pair[0]}` ({p1_val}) vs `{period_pair[1]}` ({p2_val})")
             except Exception:
                 st.warning(f"⚠️ Period cols ada tapi nilai tidak terbaca")
         else:
-            st.error(f"❌ Period cols tidak ditemukan. Butuh: {PERIOD_PAIRS}")
-            st.stop()
+            st.warning("⚠️ Period cols tidak ditemukan. Akan pakai default `P1` vs `P2`.")
 
     with val_col2:
-        # Required column check
-        missing = [c for c in REQUIRED_COLS if c not in cols_in]
-        if missing:
-            st.error(f"❌ Missing kolom: `{missing}`")
-            st.stop()
+        # Required cols
+        missing_required = [c for c in REQUIRED_COLS if c not in cols_in]
+        if not missing_required:
+            st.success(f"✅ Required cols complete: {', '.join(REQUIRED_COLS)}")
         else:
-            st.success(f"✅ Semua {len(REQUIRED_COLS)} required columns OK")
+            st.error(f"❌ MISSING required cols: {', '.join(missing_required)}")
 
-    # Process button
-    if st.button("🚀 Process Data", type="primary", key='pi_process'):
-        with st.spinner("Running PI analysis... ini bisa makan ~60 detik untuk dataset besar"):
+        # Optional cols
+        missing_opt = [c for c in OPTIONAL_COLS if c not in cols_in]
+        present_opt = [c for c in OPTIONAL_COLS if c in cols_in]
+        if missing_opt:
+            st.warning(f"⚠️ Optional cols hilang: {', '.join(missing_opt)} → akan diisi NaN")
+        if present_opt:
+            st.info(f"ℹ️ Optional cols ada: {', '.join(present_opt)}")
+
+        # Dimension cols
+        missing_dim = [c for c in DIM_COLS if c not in cols_in]
+        if missing_dim:
+            st.warning(f"⚠️ Dimension cols hilang: {', '.join(missing_dim)} → BL/L1 analysis tidak akurat")
+
+    # Preview
+    with st.expander("👀 Preview top 5 rows", expanded=False):
+        st.dataframe(df_input.head(5), use_container_width=True)
+
+    # Block if missing required
+    if missing_required:
+        st.error("Tidak bisa lanjut. Kolom wajib hilang. Cek format sesuai template.")
+        st.stop()
+
+    # Process
+    if st.button("🚀 Process Data", type="primary", use_container_width=False):
+        with st.spinner("Processing... (mungkin 10-30 detik untuk file besar)"):
             try:
-                result = pi_analyze(df_input)
+                result = analyze(df_input, progress_callback=lambda m, c, t: None)
+                st.session_state.pvm_analysis = result
+                st.session_state.pvm_uploaded_file_name = uploaded.name
+                st.session_state.pvm_uploaded_file_size = uploaded.size
+                st.success(f"✅ Data processed: {result['meta']['n_rows']:,} rows enriched")
+                st.rerun()
             except Exception as e:
-                st.error(f"❌ Analyze error: {e}")
-                st.exception(e)
-                st.stop()
+                st.error(f"❌ Processing error: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
-            st.session_state.pi_analysis = result
-            st.session_state.pi_uploaded_file_name = uploaded.name
-            st.session_state.pi_uploaded_file_size = uploaded.size
-            st.success(f"✅ Selesai! {len(result['df_enriched']):,} rows processed.")
-            st.rerun()
+# ─────────────────────────────────────────────────────────────────────────────
+# ANALYSIS DISPLAY (only if data is processed)
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.pvm_analysis is not None:
+    A = st.session_state.pvm_analysis
+    df = A['df']
+    pvm = A['pvm']
+    p1, p2 = A['p1'], A['p2']
+    TOT = pvm['TOTAL']
 
+    st.markdown(f'<div class="section-header">📈 Hasil Analisis — {p1} vs {p2}</div>', unsafe_allow_html=True)
+    st.caption(f"📌 File: `{st.session_state.pvm_uploaded_file_name}` · {A['meta']['n_rows']:,} SKU diproses")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN DASHBOARD (only if analysis available)
-# ═══════════════════════════════════════════════════════════════════════════
-if st.session_state.pi_analysis is not None:
-    result = st.session_state.pi_analysis
-    df = result['df_enriched']
-    overall = result['overall']
-    segments = result['segments']
-    contribs = result['contribs']
-    period_p1 = result['period_p1']
-    period_p2 = result['period_p2']
+    # ─────────────────────────────────────────────────────────────────────
+    # ANOMALY BANNER
+    # ─────────────────────────────────────────────────────────────────────
+    anomalies = detect_anomalies(pvm)
+    if anomalies:
+        if len(anomalies) == 1:
+            a = anomalies[0]
+            drivers_txt = "; ".join(a['drivers']) if a['drivers'] else "lihat detail di Margin Bridge"
+            st.markdown(
+                f'<div class="banner-warn">'
+                f'<div class="banner-title">⚠️ {a["bl"]} flagged</div>'
+                f'GP turun <b>{a["gp_pct"]*100:.1f}%</b> ({fmt_rp(a["gp_diff"])} Rp) — {drivers_txt}.'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            bl_list = ", ".join([f"{a['bl']} (GP {a['gp_pct']*100:.1f}%)" for a in anomalies])
+            st.markdown(
+                f'<div class="banner-warn">'
+                f'<div class="banner-title">⚠️ {len(anomalies)} BL flagged</div>'
+                f'{bl_list}. Lihat detail per BL di Margin Bridge & L1 Breakdown.'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+    else:
+        st.markdown(
+            '<div class="banner-ok">'
+            '<div class="banner-title">✅ Semua BL dalam threshold normal</div>'
+            'Tidak ada anomaly minggu ini (GP Δ% > -3% dan GV Δ% > -4%).'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # HASIL ANALISIS HEADER
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown(f'<div class="section-header">📈 Hasil Analisis — {period_p1} vs {period_p2}</div>',
-                unsafe_allow_html=True)
-    st.markdown(f"📌 File: `{st.session_state.pi_uploaded_file_name}` · {len(df):,} SKU diproses")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 2 — EXECUTIVE SUMMARY (KPI Cards)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────
+    # ZONE 2 — EXECUTIVE KPI STRIP
+    # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">2️⃣ Executive Summary</div>', unsafe_allow_html=True)
 
-    # Compute KPIs
-    pi_a = overall['A']
-    pi_e = overall['E']
-    pi_delta = overall['total']
-    n_ex = overall['n_ex']
-    n_dep = overall['n_dep']
-    n_new = overall['n_new']
+    gv_p1, gv_p2 = TOT['gv_start'], TOT['gv_end']
+    gp_p1, gp_p2 = TOT['gp_start'], TOT['gp_end']
+    m_p1, m_p2 = TOT['m_base'], TOT['m_end']
+    gv_diff = gv_p2 - gv_p1
+    gv_diff_pct = gv_diff / gv_p1 if gv_p1 else 0
+    gp_diff = gp_p2 - gp_p1
+    gp_diff_pct = gp_diff / gp_p1 if gp_p1 else 0
+    margin_diff = m_p2 - m_p1
 
-    # Margin avg cur
-    ex_only = df[df['sku_type'] == 'Existing']
-    avg_margin = ex_only['margin_pct_cur'].mean()
+    # COGS (Overall): GV - GP
+    cogs_p1 = gv_p1 - gp_p1
+    cogs_p2 = gv_p2 - gp_p2
+    cogs_diff = cogs_p2 - cogs_p1
+    cogs_diff_pct = cogs_diff / cogs_p1 if cogs_p1 else 0
 
-    # Framework triggers
-    n_framework = int((df['framework_check'] == 'TRUE').sum())
+    # SKU counts
+    if 'sku_status' in df.columns:
+        n_existing = (df['sku_status'] == 'Existing').sum()
+        n_new = (df['sku_status'] == 'New').sum()
+        n_dep = (df['sku_status'] == 'Deprecated').sum()
+        n_active_p2 = n_existing + n_new
+        n_active_p1 = n_existing + n_dep
+    else:
+        n_existing = n_new = n_dep = n_active_p2 = n_active_p1 = 0
 
-    # COGS need improve (CI Group D + E in current)
-    n_cogs_improve = int(df['ci_group_cur'].isin(['D.95-105', 'E.>105']).sum())
+    # Qty OVERALL (Definisi A): P1 = Existing+Dep, P2 = Existing+New
+    if 'sku_status' in df.columns:
+        qty_p1_overall = df[df['sku_status'].isin(['Existing', 'Deprecated'])]['qty_p1'].sum()
+        qty_p2_overall = df[df['sku_status'].isin(['Existing', 'New'])]['qty_p2'].sum()
+        qty_p1_existing = df[df['sku_status'] == 'Existing']['qty_p1'].sum()
+        qty_p2_existing = df[df['sku_status'] == 'Existing']['qty_p2'].sum()
+        gv_p1_existing = df[df['sku_status'] == 'Existing']['gv_p1'].sum()
+        gv_p2_existing = df[df['sku_status'] == 'Existing']['gv_p2'].sum()
+    else:
+        qty_p1_overall = df['qty_p1'].sum()
+        qty_p2_overall = df['qty_p2'].sum()
+        qty_p1_existing = qty_p1_overall
+        qty_p2_existing = qty_p2_overall
+        gv_p1_existing = gv_p1
+        gv_p2_existing = gv_p2
 
-    # PI bucket distribution (Existing, cur)
-    pi_above_110 = int(ex_only['pi_group_cur'].isin(['D.105-110', 'E.110-120', 'F.>120']).sum())
-    pi_match = int(ex_only['pi_group_cur'].isin(['B.95-<100', 'C.100-105']).sum())
-    pi_below_95 = int((ex_only['pi_group_cur'] == 'A.<95').sum())
-    n_ex_total = len(ex_only) if len(ex_only) > 0 else 1
+    qty_diff_overall = qty_p2_overall - qty_p1_overall
+    qty_diff_pct_overall = qty_diff_overall / qty_p1_overall if qty_p1_overall else 0
 
-    # Row 1: PI / ΔPI / Avg Margin
+    # Avg Price/Unit (Existing only, per user request)
+    avg_price_p1 = gv_p1_existing / qty_p1_existing if qty_p1_existing else 0
+    avg_price_p2 = gv_p2_existing / qty_p2_existing if qty_p2_existing else 0
+    avg_price_diff = avg_price_p2 - avg_price_p1
+    avg_price_diff_pct = avg_price_diff / avg_price_p1 if avg_price_p1 else 0
+
+    # GP per SKU (productivity metric)
+    gp_per_sku_p1 = gp_p1 / n_active_p1 if n_active_p1 else 0
+    gp_per_sku_p2 = gp_p2 / n_active_p2 if n_active_p2 else 0
+    gp_per_sku_diff = gp_per_sku_p2 - gp_per_sku_p1
+    gp_per_sku_diff_pct = gp_per_sku_diff / gp_per_sku_p1 if gp_per_sku_p1 else 0
+
+    # Row 1: GV / GP / Margin
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(kpi_card(
-            "Avg PI Current (E)",
-            fmt_pi(pi_e),
-            delta=pi_delta,
-            delta_label=fmt_pi_delta(pi_delta),
-            sub=f"P1 (A): {fmt_pi(pi_a)}"
+            "Goods Value",
+            fmt_rp(gv_p2),
+            delta=gv_diff_pct,
+            delta_label=f"{fmt_rp(gv_diff)} ({gv_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(gv_p1)}"
         ), unsafe_allow_html=True)
     with c2:
-        # Total decomposition magnitude
-        total_abs = abs(overall['eff_dep']) + abs(overall['eff_price']) + abs(overall['eff_comp']) + abs(overall['eff_new'])
         st.markdown(kpi_card(
-            "Total Δ PI",
-            fmt_pi_delta(pi_delta),
-            sub=f"Sum |effects| = {total_abs:.3f}"
+            "Gross Profit",
+            fmt_rp(gp_p2),
+            delta=gp_diff_pct,
+            delta_label=f"{fmt_rp(gp_diff)} ({gp_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(gp_p1)}"
         ), unsafe_allow_html=True)
     with c3:
         st.markdown(kpi_card(
-            "Avg Margin % (Existing, Cur)",
-            fmt_pct(avg_margin) if pd.notna(avg_margin) else "—",
-            sub="Average margin di SKU Existing"
+            "Margin",
+            fmt_pct(m_p2),
+            delta=margin_diff,
+            delta_label=fmt_pp(margin_diff, decimals=3),
+            sub=f"P1: {fmt_pct(m_p1)}"
         ), unsafe_allow_html=True)
 
-    # Row 2: SKU counts
+    # Row 2: Qty (Overall) / COGS / Avg Price/Unit (Existing)
     c4, c5, c6 = st.columns(3)
     with c4:
         st.markdown(kpi_card(
-            "# SKU Existing",
-            fmt_count(n_ex),
-            sub=f"Punya PI di P1 dan P2"
+            "Qty Sold (Overall)",
+            f"{qty_p2_overall/1e6:.2f} M",
+            delta=qty_diff_pct_overall,
+            delta_label=f"{qty_diff_overall:+,.0f} ({qty_diff_pct_overall*100:+.2f}%)",
+            sub=f"P1: {qty_p1_overall/1e6:.2f} M (Existing+Dep) · P2: Existing+New"
         ), unsafe_allow_html=True)
     with c5:
         st.markdown(kpi_card(
-            "# SKU New",
-            fmt_count(n_new),
-            sub=f"Muncul di P2 only"
+            "COGS",
+            fmt_rp(cogs_p2),
+            delta=cogs_diff_pct,
+            delta_label=f"{fmt_rp(cogs_diff)} ({cogs_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(cogs_p1)}",
+            delta_inverse=True  # lower COGS = good
         ), unsafe_allow_html=True)
     with c6:
         st.markdown(kpi_card(
-            "# SKU Departing",
-            fmt_count(n_dep),
-            sub=f"Ada di P1, hilang di P2"
+            "Avg Price/Unit",
+            f"Rp {avg_price_p2:,.0f}",
+            delta=avg_price_diff_pct,
+            delta_label=f"{avg_price_diff:+,.0f} ({avg_price_diff_pct*100:+.2f}%)",
+            sub=f"P1: Rp {avg_price_p1:,.0f} · (Existing SKU only)"
         ), unsafe_allow_html=True)
 
-    # Row 3: Action SKU counts
+    # Row 3: # SKU Active / SKU Churn / GP per SKU
     c7, c8, c9 = st.columns(3)
     with c7:
         st.markdown(kpi_card(
-            "🚨 Framework Triggered",
-            fmt_count(n_framework),
-            sub="SKU butuh repricing action"
+            "# SKU Active P2",
+            f"{n_active_p2:,}",
+            sub=f"Existing: {n_existing:,} · P1 Active: {n_active_p1:,}"
         ), unsafe_allow_html=True)
     with c8:
         st.markdown(kpi_card(
-            "⚠️ COGS Need Improve",
-            fmt_count(n_cogs_improve),
-            sub="CI Group D (95-105) atau E (>105)"
+            "SKU Churn",
+            f"+{n_new:,} / -{n_dep:,}",
+            sub=f"Net: {n_new - n_dep:+,} (New − Deprecated)"
         ), unsafe_allow_html=True)
     with c9:
         st.markdown(kpi_card(
-            "PI Distribution (Cur)",
-            f"{pi_above_110/n_ex_total*100:.0f}% Above110 · {pi_match/n_ex_total*100:.0f}% Match",
-            sub=f"Below95: {pi_below_95/n_ex_total*100:.0f}% · {n_ex_total:,} Existing"
+            "GP per SKU",
+            fmt_rp(gp_per_sku_p2),
+            delta=gp_per_sku_diff_pct,
+            delta_label=f"{fmt_rp(gp_per_sku_diff)} ({gp_per_sku_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(gp_per_sku_p1)} · Productivity"
         ), unsafe_allow_html=True)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 3 — PI DECOMPOSITION (Tornado + Tabel 1 + Tabel 2)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">3️⃣ PI Decomposition (Shapley)</div>', unsafe_allow_html=True)
+    # ─────────────────────────────────────────────────────────────────────
+    # ZONE 3 — MARGIN BRIDGE (Tornado + 2 Tables)
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">3️⃣ Margin Bridge</div>', unsafe_allow_html=True)
 
     # Narrative
-    direction = "naik" if pi_delta > 0 else "turun"
-    # Top driver
-    drivers = [
-        ('1. Churned SKU', overall['eff_dep']),
-        ('2. Price Change Effect', overall['eff_price']),
-        ('3. Comp Effect', overall['eff_comp']),
-        ('4. New SKU', overall['eff_new']),
-    ]
-    top_driver = max(drivers, key=lambda x: abs(x[1]))
+    pp_existing_tot = TOT['pp_cogs'] + TOT['pp_price'] + TOT['pp_volmix']
+    pp_total = TOT['pp_total']
+    gp_diff_tot = TOT['gp_end'] - TOT['gp_start']
+    growth_pct_tot = gp_diff_tot / TOT['gp_start'] if TOT['gp_start'] else 0
+
+    drivers_sorted = sorted(
+        [('2.1 COGS Effect', TOT['pp_cogs']),
+         ('2.2 Price Effect', TOT['pp_price']),
+         ('2.3 Vol/Mix Effect', TOT['pp_volmix']),
+         ('1. Churned SKU Effect', TOT['pp_B']),
+         ('3. New SKU Effect', TOT['pp_G'])],
+        key=lambda x: abs(x[1]), reverse=True
+    )
+    top_drivers = drivers_sorted[:2]
+    drivers_txt = " dan ".join([f"**{n}** ({fmt_pp(v, 3)})" for n, v in top_drivers])
+
+    direction = "naik" if pp_total >= 0 else "turun"
     st.markdown(f"""
-    PI overall **{direction}** dari **{pi_a:.2f}** ke **{pi_e:.2f}** (Δ **{pi_delta:+.3f}**).
-    Driver utama: **{top_driver[0]}** ({top_driver[1]:+.3f}).
-    Comp effect breakdown — Normal: **{overall['eff_normal_comp']:+.3f}**, Blended (Discount): **{overall['eff_discount_comp']:+.3f}**.
+        Margin {direction} **{fmt_pp(pp_total, 3)}** dari **{fmt_pct(m_p1)}** ke **{fmt_pct(m_p2)}**.
+        GP absolut: **{fmt_rp(gp_diff_tot)}** ({growth_pct_tot*100:+.2f}% growth vs P1).
+        Driver utama: {drivers_txt}.
+        Existing SKU Effect = COGS + Price + Vol/Mix = **{fmt_pp(pp_existing_tot, 3)}**.
     """)
 
-    # Scope filter for tornado
-    scope_t = st.radio(
-        "Scope:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_zone3_scope'
-    )
-    if scope_t == 'Overall':
-        decomp_for_chart = overall
-    else:
-        decomp_for_chart = segments[scope_t]
+    # Scope toggle + mode toggle (3 units now)
+    bx1, bx2 = st.columns([2, 1])
+    with bx1:
+        scope = st.radio(
+            "Scope:",
+            ['TOTAL', 'Dry', 'Fresh', 'Frozen', 'PL'],
+            horizontal=True,
+            key='bridge_scope',
+        )
+    with bx2:
+        mode = st.radio(
+            "Unit:",
+            ['Rupiah (Rp)', 'Growth %', 'Margin (pp)'],
+            horizontal=True,
+            key='bridge_mode'
+        )
+        if 'Rupiah' in mode:
+            mode_key = 'rp'
+        elif 'Growth' in mode:
+            mode_key = 'pct'
+        else:
+            mode_key = 'pp'
 
-    fig_tornado = make_pi_tornado(decomp_for_chart, scope_label=scope_t)
+    # Tornado chart
+    fig_tornado = make_tornado_chart(pvm, scope=scope, mode=mode_key)
     st.plotly_chart(fig_tornado, use_container_width=True)
 
-    # Tabel 1: Per-segment decomposition
-    st.markdown("##### 📊 Tabel 1: PI Decomposition per Segment")
-    st.caption("Step-by-step PI movement per segment. Sum dari 5 effect = Total Δ (math identity exact via Shapley).")
+    # ── TABEL 1: Margin Bridge per BL (unit-aware) ────────────────────────
+    unit_label_t1 = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'Growth %'}[mode_key]
+    st.markdown(f"##### 📊 Tabel 1: Margin Bridge per BL ({unit_label_t1})")
+    st.caption("Margin/GP **dalam** masing-masing BL (un-weighted). Ikutin unit toggle di atas. "
+               "Bisa lihat before-after per BL.")
 
-    t1 = build_pi_decomp_table(overall, segments, contribs)
-    seg_cols = ['Overall', 'Dry', 'Fresh', 'Frozen']
-    # Format display
-    def fmt_t1_row(row):
-        label = row['Step']
-        is_baseline = 'Baseline' in label or 'Result' in label
-        out = {'Step': label}
-        for c in seg_cols:
-            v = row[c]
+    bridge_df = build_margin_pp_bridge_df(pvm, mode=mode_key)
+    bl_cols = ['Dry', 'Fresh', 'Frozen', 'PL', 'Overall']
+
+    # Identify row types for special handling
+    def _is_baseline_row(label):
+        """Margin/GP P1 Start or P2 End row — show as absolute number, not delta."""
+        return 'Start' in label or 'End' in label
+
+    def _is_total_row(label):
+        return 'Total' in label and 'Effect' not in label
+
+    # Format cells per row type
+    def format_bridge_df_unit(df_, mode_):
+        out_rows = []
+        for _, row in df_.iterrows():
+            label = row['Step']
+            is_baseline = _is_baseline_row(label)
+            new_row = {'Step': label}
+            for col in bl_cols:
+                v = row[col]
+                if pd.isna(v):
+                    new_row[col] = '—'
+                elif mode_ == 'pp':
+                    if is_baseline:
+                        new_row[col] = f"{v:.2f}%"
+                    else:
+                        new_row[col] = f"{v:+.3f}pp"
+                elif mode_ == 'rp':
+                    # All values are Rp (baselines + effects)
+                    new_row[col] = fmt_rp(v)
+                else:  # pct
+                    if is_baseline:
+                        # Show GP P1/P2 as Rp (absolute baseline)
+                        new_row[col] = fmt_rp(v)
+                    else:
+                        new_row[col] = f"{v:+.2f}%"
+            new_row['Reference'] = row['Reference']
+            out_rows.append(new_row)
+        return pd.DataFrame(out_rows)
+
+    bridge_display = format_bridge_df_unit(bridge_df, mode_key)
+
+    # Color scheme: gradient red-white-green by magnitude on effect cells only.
+    # Baseline rows (Margin P1/P2 Start/End) → grey subtle bg.
+    def style_bridge_gradient(df_orig, df_disp):
+        """Apply gradient based on numeric values in df_orig (numeric), to df_disp (str cells)."""
+        # Compute color matrix from numeric values
+        # vmax = max absolute across all effect (non-baseline) cells
+        effect_mask = df_orig['Step'].apply(lambda s: not _is_baseline_row(s))
+        effect_vals = df_orig.loc[effect_mask, bl_cols].values.flatten()
+        effect_vals = [v for v in effect_vals if pd.notna(v)]
+        vmax = max(abs(v) for v in effect_vals) if effect_vals else 1
+        if vmax == 0: vmax = 1
+
+        def color_cell(val_numeric, is_baseline):
             if is_baseline:
-                out[c] = f"{v:.4f}" if pd.notna(v) else "—"
+                return 'background-color: #F3F4F6; font-weight: 700;'
+            if pd.isna(val_numeric):
+                return ''
+            # Normalize to [-1, 1]
+            norm = max(-1, min(1, val_numeric / vmax))
+            if norm > 0:
+                # Green gradient: white → light green → strong green
+                alpha = norm  # 0..1
+                r = int(255 - (255-22) * alpha)   # 255 → 22 (green700 #16A34A)
+                g = int(255 - (255-163) * alpha)  # 255 → 163
+                b = int(255 - (255-74) * alpha)   # 255 → 74
+                return f'background-color: rgb({r},{g},{b}); color: #111827;'
+            elif norm < 0:
+                alpha = -norm
+                r = int(255 - (255-220) * alpha)  # 255 → 220 (red600 #DC2626)
+                g = int(255 - (255-38) * alpha)
+                b = int(255 - (255-38) * alpha)
+                # Strong red → white text
+                text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                return f'background-color: rgb({r},{g},{b}); color: {text_color};'
             else:
-                out[c] = f"{v:+.4f}" if pd.notna(v) else "—"
-        return out
-    t1_display = pd.DataFrame([fmt_t1_row(r) for _, r in t1.iterrows()])
+                return ''
 
-    # Color the effect rows
-    def style_t1(orig, disp):
-        # Compute vmax from non-baseline rows
-        effect_mask = ~orig['Step'].str.contains('Baseline|Result', regex=True)
-        vals = orig.loc[effect_mask, seg_cols].values.flatten()
+        def apply_style(row):
+            label = row['Step']
+            is_baseline = _is_baseline_row(label)
+            is_total = _is_total_row(label)
+            styles = []
+            for col in df_disp.columns:
+                if col == 'Step':
+                    if is_total:
+                        styles.append('font-weight: 700; background-color: #DBEAFE;')
+                    elif is_baseline:
+                        styles.append('font-weight: 700; background-color: #F3F4F6;')
+                    elif label.startswith('2. Existing'):
+                        styles.append('font-weight: 600;')
+                    elif label.startswith('  '):
+                        styles.append('padding-left: 20px;')
+                    else:
+                        styles.append('')
+                elif col == 'Reference':
+                    styles.append('color: #6B7280; font-style: italic;')
+                else:
+                    # Numeric column - look up original numeric value
+                    orig_idx = row.name
+                    val_num = df_orig.loc[orig_idx, col] if col in df_orig.columns else np.nan
+                    if is_total:
+                        base_style = color_cell(val_num, False) + ' font-weight: 700;'
+                    elif is_baseline:
+                        base_style = 'background-color: #F3F4F6; font-weight: 700;'
+                    else:
+                        base_style = color_cell(val_num, False)
+                    styles.append(base_style)
+            return styles
+
+        return df_disp.style.apply(apply_style, axis=1)
+
+    st.dataframe(
+        style_bridge_gradient(bridge_df, bridge_display),
+        use_container_width=True, hide_index=True
+    )
+
+    # ── TABEL 2: BL Contribution to Overall (fix pp, gradient) ───────────
+    st.markdown("##### 📊 Tabel 2: BL Contribution to Overall Margin Change")
+    st.caption("Decomposes Overall ΔMargin into **Margin Change Effect** (margin change per BL × GV weight P2) + "
+               "**BL Mix Effect** (GV weight shift × Margin P1). "
+               "**Math identity:** Σ Margin Change + Σ BL Mix = Total Overall = Actual ΔMargin Overall (exact). "
+               "Fix pp, tidak ikut unit toggle.")
+
+    contrib_df = build_bl_contribution_df(pvm)
+    contrib_bl_cols = ['Dry contrib', 'Fresh contrib', 'Frozen contrib', 'PL contrib', 'Overall']
+
+    # Format cells as pp
+    contrib_display = contrib_df.copy()
+    for col in contrib_bl_cols:
+        contrib_display[col] = contrib_display[col].apply(lambda v: f"{v:+.3f}pp" if pd.notna(v) else '—')
+
+    def style_contrib_gradient(df_orig, df_disp):
+        # Compute color range from non-total rows
+        non_total = df_orig['Step'].apply(lambda s: 'Total' not in s)
+        vals = df_orig.loc[non_total, contrib_bl_cols].values.flatten()
         vals = [v for v in vals if pd.notna(v)]
         vmax = max(abs(v) for v in vals) if vals else 1
         if vmax == 0: vmax = 1
 
-        def apply_row(row):
+        def color_cell(val_numeric):
+            if pd.isna(val_numeric): return ''
+            norm = max(-1, min(1, val_numeric / vmax))
+            if norm > 0:
+                alpha = norm
+                r = int(255 - (255-22) * alpha)
+                g = int(255 - (255-163) * alpha)
+                b = int(255 - (255-74) * alpha)
+                return f'background-color: rgb({r},{g},{b}); color: #111827;'
+            elif norm < 0:
+                alpha = -norm
+                r = int(255 - (255-220) * alpha)
+                g = int(255 - (255-38) * alpha)
+                b = int(255 - (255-38) * alpha)
+                text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                return f'background-color: rgb({r},{g},{b}); color: {text_color};'
+            return ''
+
+        def apply_style(row):
             label = row['Step']
-            is_baseline = ('Baseline' in label) or ('Result' in label)
-            is_total = 'Total Δ' in label
+            is_total = 'Total' in label
             styles = []
-            for col in disp.columns:
+            for col in df_disp.columns:
                 if col == 'Step':
-                    if is_baseline:
-                        styles.append('background-color: #F3F4F6; font-weight: 700;')
-                    elif is_total:
-                        styles.append('background-color: #DBEAFE; font-weight: 700;')
-                    elif label.startswith('    '):
-                        styles.append('padding-left: 24px;')
+                    if is_total:
+                        styles.append('font-weight: 700; background-color: #DBEAFE;')
+                    elif label.startswith('2. Existing'):
+                        styles.append('font-weight: 600;')
+                    elif label.startswith('  '):
+                        styles.append('padding-left: 20px;')
                     else:
                         styles.append('')
                 else:
-                    if is_baseline:
-                        styles.append('background-color: #F3F4F6; font-weight: 700;')
-                    elif is_total:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax) + ' font-weight: 700;')
-                    else:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax))
+                    orig_idx = row.name
+                    val_num = df_orig.loc[orig_idx, col] if col in df_orig.columns else np.nan
+                    base = color_cell(val_num)
+                    if is_total:
+                        base += ' font-weight: 700;'
+                    styles.append(base)
             return styles
-        return disp.style.apply(apply_row, axis=1)
 
-    st.dataframe(style_t1(t1, t1_display), use_container_width=True, hide_index=True)
+        return df_disp.style.apply(apply_style, axis=1)
 
-    # Tabel 2: Per-segment contribution to OVERALL
-    st.markdown("##### 📊 Tabel 2: Segment Contribution to Overall (Exact Math Identity)")
-    st.caption("Σ Dry + Fresh + Frozen = Overall (exact, zero residual). Methodology: exact_contributions formula.")
-
-    t2 = build_pi_contrib_table(overall, contribs)
-    t2_cols = ['Dry contrib', 'Fresh contrib', 'Frozen contrib', 'Overall (sum)', 'Overall actual']
-
-    def fmt_t2_row(row):
-        out = {'Effect': row['Effect']}
-        for c in t2_cols:
-            out[c] = f"{row[c]:+.4f}" if pd.notna(row[c]) else "—"
-        return out
-    t2_display = pd.DataFrame([fmt_t2_row(r) for _, r in t2.iterrows()])
-
-    def style_t2(orig, disp):
-        vals = orig[t2_cols].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-        def apply_row(row):
-            styles = []
-            for col in disp.columns:
-                if col in ('Effect',):
-                    styles.append('')
-                else:
-                    v = orig.loc[row.name, col]
-                    styles.append(gradient_color(v, vmax))
-            return styles
-        return disp.style.apply(apply_row, axis=1)
-
-    st.dataframe(style_t2(t2, t2_display), use_container_width=True, hide_index=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 4 — L1 CATEGORY BREAKDOWN
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">4️⃣ L1 Category Movement</div>', unsafe_allow_html=True)
-    st.caption("PI movement per L1 category dengan 5-component decomposition.")
-
-    l1_scope = st.radio(
-        "Scope L1:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_l1_scope'
+    st.dataframe(
+        style_contrib_gradient(contrib_df, contrib_display),
+        use_container_width=True, hide_index=True
     )
-    l1_table = build_l1_pi_table(df, scope=l1_scope)
-    if l1_table.empty:
-        st.info("Tidak ada data L1 untuk scope ini.")
-    else:
-        # Format columns
-        l1_display = l1_table.copy()
-        for c in ['Avg PI Prev (A)', 'Avg PI Cur (E)']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
-        for c in ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                  '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{v:+.3f}" if pd.notna(v) else "—")
-        for c in ['n Existing', 'n Departing', 'n New']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "—")
 
-        # Gradient on effect columns
-        effect_cols_l1 = ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                         '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']
-        vals = l1_table[effect_cols_l1].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
+    # Per-BL contribution table below (Rp + Growth % + GV)
+    with st.expander("📋 Breakdown numerical Rp (semua BL)", expanded=False):
+        # Compute total GV per periode for weight calc
+        total_gv_p1_all = sum(pvm[bl]['gv_start'] for bl in BL_ORDER)
+        total_gv_p2_all = sum(pvm[bl]['gv_end'] for bl in BL_ORDER)
 
-        def apply_l1_style(row):
-            styles = []
-            for col in l1_display.columns:
-                if col in effect_cols_l1:
-                    v = l1_table.loc[row.name, col]
-                    styles.append(gradient_color(v, vmax))
-                else:
-                    styles.append('')
-            return styles
+        bridge_data = []
+        for bl in ['TOTAL'] + BL_ORDER:
+            d = pvm[bl]
+            existing_rp = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
+            gp_p1_bl = d['gp_start'] if d['gp_start'] else 1
 
-        st.markdown(f"**Scope: {l1_scope}** · {len(l1_display)} L1 categories (sorted by Total Δ desc)")
+            # GV Weight = BL_GV / total_GV per periode
+            if bl == 'TOTAL':
+                gv_wt_p1 = 1.0
+                gv_wt_p2 = 1.0
+            else:
+                gv_wt_p1 = d['gv_start'] / total_gv_p1_all if total_gv_p1_all else 0
+                gv_wt_p2 = d['gv_end'] / total_gv_p2_all if total_gv_p2_all else 0
+
+            bridge_data.append({
+                'Scope': bl,
+                'GV P1': d['gv_start'],
+                'GV P2': d['gv_end'],
+                'GV Weight P1': gv_wt_p1,
+                'GV Weight P2': gv_wt_p2,
+                'GP P1': d['gp_start'],
+                'GP P2': d['gp_end'],
+                'GP Δ': d['gp_end'] - d['gp_start'],
+                'Growth %': (d['gp_end'] - d['gp_start']) / gp_p1_bl * 100,
+                '1. Churned (Rp)': -d['gp_dep'],
+                '2. Existing (Rp)': existing_rp,
+                '  2.1 COGS (Rp)': d['cogs_rp'],
+                '  2.2 Price (Rp)': d['price_rp'],
+                '  2.3 Vol/Mix (Rp)': d['volmix_rp'],
+                '3. New SKU (Rp)': d['gp_new'],
+                'Margin P1': d['m_base'],
+                'Margin P2': d['m_end'],
+                'Margin Δ (pp)': d['pp_total'] * 100,
+            })
+        bdf = pd.DataFrame(bridge_data)
         st.dataframe(
-            l1_display.style.apply(apply_l1_style, axis=1),
-            use_container_width=True, hide_index=True, height=600
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 5 — PRICE × COMP MATRIX
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">5️⃣ Price × Comp Direction Matrix</div>', unsafe_allow_html=True)
-    st.caption("Behavior pattern: SKU yang harga naik/turun vs gerakan kompetitor. Existing SKU only.")
-
-    matrix_scope = st.radio(
-        "Scope Matrix:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_matrix_scope'
-    )
-    matrix_df, n_total = build_price_comp_matrix(df, scope=matrix_scope)
-    if matrix_df is None:
-        st.info("Tidak ada data Existing SKU untuk scope ini.")
-    else:
-        # Display matrix + percentage
-        st.markdown(f"**Scope: {matrix_scope}** · Total {n_total:,} Existing SKU")
-
-        # Count matrix
-        m_count = matrix_df.copy()
-        m_count['Total'] = m_count.sum(axis=1)
-        m_count.loc['TOTAL'] = m_count.sum(axis=0)
-
-        # Pct matrix
-        m_pct = matrix_df / n_total * 100
-
-        st.markdown("**Count (SKU):**")
-        st.dataframe(m_count.style.format("{:,}"), use_container_width=True)
-
-        st.markdown("**% of Total Existing:**")
-        # Gradient coloring on pct
-        max_p = m_pct.values.max()
-        def color_pct(val):
-            if pd.isna(val): return ''
-            alpha = val / max_p if max_p > 0 else 0
-            r = int(255 - (255-22) * alpha)
-            g = int(255 - (255-163) * alpha)
-            b = int(255 - (255-74) * alpha)
-            return f'background-color: rgb({r},{g},{b}); color: #111827;'
-        st.dataframe(
-            m_pct.style.format("{:.1f}%").map(color_pct),
-            use_container_width=True
-        )
-
-        # Diagonal vs off-diagonal insight
-        diag_sum = sum(matrix_df.iloc[i, i] for i in range(3))
-        st.caption(f"💡 Diagonal (Price follows Comp direction): **{diag_sum:,}** SKU "
-                  f"({diag_sum/n_total*100:.1f}%). "
-                  f"Off-diagonal = misaligned dengan kompetitor.")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 6 — PI DISTRIBUTION
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">6️⃣ PI Distribution & Movement</div>', unsafe_allow_html=True)
-    st.caption("Berapa SKU yang bergerak antar PI bucket. Existing SKU only.")
-
-    dist_scope = st.radio(
-        "Scope Distribution:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_dist_scope'
-    )
-    dist_df = build_pi_distribution(df, scope=dist_scope)
-    if dist_df.empty:
-        st.info("Tidak ada data Existing untuk scope ini.")
-    else:
-        # Bar chart side-by-side Prev vs Cur
-        fig_dist = go.Figure()
-        fig_dist.add_trace(go.Bar(
-            name='Prev',
-            x=dist_df['PI Bucket'],
-            y=dist_df['n Prev'],
-            marker_color='#9CA3AF',
-            text=dist_df['n Prev'].apply(lambda v: f"{int(v):,}"),
-            textposition='outside',
-        ))
-        fig_dist.add_trace(go.Bar(
-            name='Cur',
-            x=dist_df['PI Bucket'],
-            y=dist_df['n Cur'],
-            marker_color='#2563EB',
-            text=dist_df['n Cur'].apply(lambda v: f"{int(v):,}"),
-            textposition='outside',
-        ))
-        fig_dist.update_layout(
-            title=f"PI Bucket Distribution — {dist_scope}",
-            barmode='group',
-            height=400,
-            plot_bgcolor='white',
-            margin=dict(t=60, b=40, l=40, r=20),
-        )
-        fig_dist.update_yaxes(showgrid=True, gridcolor='#F3F4F6')
-        st.plotly_chart(fig_dist, use_container_width=True)
-
-        # Distribution table with delta
-        dist_disp = dist_df.copy()
-        dist_disp['n Prev']  = dist_disp['n Prev'].apply(lambda v: f"{int(v):,}")
-        dist_disp['n Cur']   = dist_disp['n Cur'].apply(lambda v: f"{int(v):,}")
-        dist_disp['Δ Count'] = dist_disp['Δ Count'].apply(lambda v: f"{v:+,}")
-        dist_disp['% Prev']  = dist_disp['% Prev'].apply(lambda v: f"{v*100:.1f}%")
-        dist_disp['% Cur']   = dist_disp['% Cur'].apply(lambda v: f"{v*100:.1f}%")
-        dist_disp['Δ %']     = dist_disp['Δ %'].apply(lambda v: f"{v*100:+.1f}%")
-        st.dataframe(dist_disp, use_container_width=True, hide_index=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 7 — TOP MOVERS SKU
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">7️⃣ Top Movers SKU (by Δ PI)</div>', unsafe_allow_html=True)
-    st.caption("Top 30 SKU dengan PI movement terbesar (gainers ↑ = PI naik = harga makin mahal vs comp). "
-               "Existing SKU only.")
-
-    gainers, losers = build_top_movers_pi(df, n=30)
-
-    mv_col1, mv_col2 = st.columns(2)
-    fmt_mover = {
-        'Δ PI': '{:+.2f}',
-        'Price Eff': '{:+.3f}',
-        'Comp Price Eff': '{:+.3f}',
-        'Normal Comp Eff': '{:+.3f}',
-        'Discount Comp Eff': '{:+.3f}',
-        'Price Δ%': '{:+.2%}',
-        'COGS Δ%': '{:+.2%}',
-    }
-
-    with mv_col1:
-        st.markdown("**🔼 Top 30 PI Gainers (PI naik)**")
-        if gainers.empty:
-            st.info("Tidak ada data.")
-        else:
-            gdf = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(gainers.iterrows())])
-            st.dataframe(
-                gdf.style.format(fmt_mover),
-                use_container_width=True, hide_index=True, height=600
-            )
-
-    with mv_col2:
-        st.markdown("**🔽 Top 30 PI Losers (PI turun)**")
-        if losers.empty:
-            st.info("Tidak ada data.")
-        else:
-            ldf = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(losers.iterrows())])
-            st.dataframe(
-                ldf.style.format(fmt_mover),
-                use_container_width=True, hide_index=True, height=600
-            )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 8 — PI DISTRIBUTION (alt visual already in Zone 6)
-    # We use this slot for: STRUCTURAL LOSS + COGS NEED IMPROVE
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">8️⃣ Quadrant Analysis (PI × Margin × CI)</div>', unsafe_allow_html=True)
-    st.caption("Cross-tables untuk identify SKU clusters yang misaligned.")
-
-    quad_tabs = st.tabs(["PI vs Margin", "COGS Index vs PI", "COGS Index vs Margin"])
-
-    ex_only_q = df[df['sku_type'] == 'Existing']
-
-    with quad_tabs[0]:
-        # PI bucket × Margin bucket count matrix
-        if 'pi_group_cur' in ex_only_q.columns and 'margin_group_cur' in ex_only_q.columns:
-            cross1 = pd.crosstab(
-                ex_only_q['pi_group_cur'],
-                ex_only_q['margin_group_cur']
-            ).reindex(index=PI_BINS_LBL, columns=MG_BINS_LBL, fill_value=0)
-            st.markdown(f"**Count of Existing SKU** by PI Bucket (rows) × Margin Bucket (cols)")
-            max_v = cross1.values.max() if cross1.values.size > 0 else 1
-            def color_count(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = val / max_v if max_v > 0 else 0
-                alpha = min(1.0, alpha)
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-            st.dataframe(cross1.style.format("{:,}").map(color_count), use_container_width=True)
-            st.caption("💡 SKU at high PI + low Margin = double whammy (uncompetitive + low profit). "
-                      "Low PI + high Margin = good underpriced position (room to test price up).")
-
-    with quad_tabs[1]:
-        if 'ci_group_cur' in ex_only_q.columns and 'pi_group_cur' in ex_only_q.columns:
-            cross2 = pd.crosstab(
-                ex_only_q['ci_group_cur'],
-                ex_only_q['pi_group_cur']
-            ).reindex(index=CI_BINS_LBL, columns=PI_BINS_LBL, fill_value=0)
-            st.markdown(f"**Count of Existing SKU** by COGS Index (rows) × PI Bucket (cols)")
-            max_v = cross2.values.max() if cross2.values.size > 0 else 1
-            def color_count2(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = val / max_v if max_v > 0 else 0
-                alpha = min(1.0, alpha)
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-            st.dataframe(cross2.style.format("{:,}").map(color_count2), use_container_width=True)
-            st.caption("💡 High CI (D/E) + High PI = structurally over-priced (cost lebih mahal dari comp + jual lebih mahal). "
-                      "Vendor negotiation needed.")
-
-    with quad_tabs[2]:
-        if 'ci_group_cur' in ex_only_q.columns and 'margin_group_cur' in ex_only_q.columns:
-            cross3 = pd.crosstab(
-                ex_only_q['ci_group_cur'],
-                ex_only_q['margin_group_cur']
-            ).reindex(index=CI_BINS_LBL, columns=MG_BINS_LBL, fill_value=0)
-            st.markdown(f"**Count of Existing SKU** by COGS Index (rows) × Margin Bucket (cols)")
-            max_v = cross3.values.max() if cross3.values.size > 0 else 1
-            def color_count3(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = val / max_v if max_v > 0 else 0
-                alpha = min(1.0, alpha)
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-            st.dataframe(cross3.style.format("{:,}").map(color_count3), use_container_width=True)
-            st.caption("💡 High CI (D/E) + Low Margin = structural loss (cost mahal + margin tipis).")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 9 — FRAMEWORK CHECK
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">9️⃣ Framework Check — Actionable SKU List</div>',
-                unsafe_allow_html=True)
-    st.caption("SKU yang trigger business rules untuk repricing. Definisi 5 rules: lihat caption per row.")
-
-    fc_df = build_framework_check_table(df)
-    if fc_df.empty:
-        st.info("✅ Tidak ada SKU yang trigger framework rules.")
-    else:
-        # Summary by rule
-        rule_summary = fc_df['Rule'].value_counts().reset_index()
-        rule_summary.columns = ['Rule', 'Count']
-        st.markdown(f"**Total {len(fc_df)} SKU trigger framework. Breakdown:**")
-        st.dataframe(rule_summary, hide_index=True, use_container_width=True)
-
-        st.markdown("**Detail SKU:**")
-        fc_disp = fc_df.copy()
-        if 'pi' in fc_disp.columns:
-            fc_disp['pi'] = fc_disp['pi'].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
-            fc_disp['next_pi'] = fc_disp['next_pi'].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
-            fc_disp['diff_pi'] = fc_disp['diff_pi'].apply(lambda v: f"{v:+.2f}" if pd.notna(v) else "—")
-        for c in ['margin_pct_prev', 'margin_pct_cur']:
-            if c in fc_disp.columns:
-                fc_disp[c] = fc_disp[c].apply(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "—")
-        for c in ['price', 'next_price', 'cogs', 'next_cogs', 'comp_price', 'next_comp_price']:
-            if c in fc_disp.columns:
-                fc_disp[c] = fc_disp[c].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-        st.dataframe(fc_disp, use_container_width=True, hide_index=True, height=500)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 10 — STRUCTURAL LOSS + COGS NEED IMPROVE
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">🔟 Structural Loss & COGS Need Improve</div>',
-                unsafe_allow_html=True)
-    st.caption("L1 categories dengan banyak SKU di CI Group D/E (cost mahal vs comp) — procurement action needed.")
-
-    sl_col1, sl_col2 = st.columns(2)
-
-    with sl_col1:
-        st.markdown("##### 📋 Structural Loss by L1 Category")
-        sl_df = build_structural_loss(df)
-        if sl_df.empty:
-            st.info("Tidak ada L1 di CI Group D/E.")
-        else:
-            sl_disp = sl_df.copy()
-            sl_disp['% of Category'] = sl_disp['% of Category'].apply(lambda v: f"{v*100:.1f}%")
-            sl_disp['Avg COGS Index'] = sl_disp['Avg COGS Index'].apply(lambda v: f"{v:.1f}")
-            sl_disp['Avg Margin %'] = sl_disp['Avg Margin %'].apply(lambda v: f"{v*100:.1f}%")
-            sl_disp['Avg PI (Cur)'] = sl_disp['Avg PI (Cur)'].apply(lambda v: f"{v:.1f}")
-            sl_disp['n SKU'] = sl_disp['n SKU'].apply(lambda v: f"{v:,}")
-            st.dataframe(sl_disp, use_container_width=True, hide_index=True, height=400)
-
-    with sl_col2:
-        st.markdown("##### 📋 COGS Need Improve — SKU List Summary")
-        ci_df = build_cogs_need_improve(df)
-        if ci_df.empty:
-            st.info("Tidak ada SKU di CI D/E.")
-        else:
-            # Show count by L1 + BL
-            ci_summary = ci_df.groupby(['pricing_bl_25', 'l1_category_name']).size().reset_index()
-            ci_summary.columns = ['BL', 'L1', 'n SKU']
-            ci_summary = ci_summary.sort_values('n SKU', ascending=False).head(20)
-            ci_summary['n SKU'] = ci_summary['n SKU'].apply(lambda v: f"{v:,}")
-            st.markdown(f"**Total {len(ci_df):,} SKU need COGS improvement. Top 20 L1:**")
-            st.dataframe(ci_summary, use_container_width=True, hide_index=True, height=400)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 11 — PARETO CLASS MOVEMENT
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">1️⃣1️⃣ Pareto Class Movement</div>', unsafe_allow_html=True)
-    st.caption("PI movement per Pareto class (A/B/C) — strategic view by SKU importance.")
-
-    pareto_scope = st.radio(
-        "Scope Pareto:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_pareto_scope'
-    )
-    pareto_table = build_pareto_pi_table(df, scope=pareto_scope)
-    if pareto_table.empty:
-        st.info("Tidak ada data Pareto.")
-    else:
-        pareto_display = pareto_table.copy()
-        for c in ['Avg PI Prev (A)', 'Avg PI Cur (E)']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
-        for c in ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                  '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{v:+.3f}" if pd.notna(v) else "—")
-        for c in ['n Existing', 'n Departing', 'n New']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "—")
-
-        effect_cols_p = ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                        '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']
-        vals = pareto_table[effect_cols_p].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-
-        def apply_pareto_style(row):
-            styles = []
-            for col in pareto_display.columns:
-                if col in effect_cols_p:
-                    v = pareto_table.loc[row.name, col]
-                    styles.append(gradient_color(v, vmax))
-                else:
-                    styles.append('')
-            return styles
-
-        st.dataframe(
-            pareto_display.style.apply(apply_pareto_style, axis=1),
+            bdf.style.format({
+                'GV P1': '{:,.0f}', 'GV P2': '{:,.0f}',
+                'GV Weight P1': '{:.2%}', 'GV Weight P2': '{:.2%}',
+                'GP P1': '{:,.0f}', 'GP P2': '{:,.0f}', 'GP Δ': '{:,.0f}',
+                'Growth %': '{:+.2f}%',
+                '1. Churned (Rp)': '{:,.0f}', '2. Existing (Rp)': '{:,.0f}',
+                '  2.1 COGS (Rp)': '{:,.0f}', '  2.2 Price (Rp)': '{:,.0f}',
+                '  2.3 Vol/Mix (Rp)': '{:,.0f}', '3. New SKU (Rp)': '{:,.0f}',
+                'Margin P1': '{:.2%}', 'Margin P2': '{:.2%}', 'Margin Δ (pp)': '{:+.3f}'
+            }),
             use_container_width=True, hide_index=True
         )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DOWNLOAD EXCEL
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">📥 Download Full Report</div>', unsafe_allow_html=True)
-    st.caption("Download complete 13-sheet Excel report (sama persis output script pi_analyzer_v1.py).")
+    # ─────────────────────────────────────────────────────────────────────
+    # ZONE 4 — L1 CATEGORY BREAKDOWN
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">4️⃣ L1 Category Breakdown</div>', unsafe_allow_html=True)
 
-    # Save workbook to bytes
-    excel_buffer = io.BytesIO()
-    result['workbook'].save(excel_buffer)
-    excel_buffer.seek(0)
+    if 'l1_category' not in df.columns:
+        st.warning("⚠️ Kolom `l1_category` tidak tersedia — L1 breakdown di-skip.")
+    else:
+        l1 = compute_l1_breakdown(df)
+        top_gain = l1.head(3)
+        top_loss = l1.tail(3).sort_values('gp_diff')
+        gain_sum = top_gain['gp_diff'].sum()
+        loss_sum = top_loss['gp_diff'].sum()
 
-    out_name = f"PI_Analysis_{result['period_type']}_{period_p1}_vs_{period_p2}.xlsx"
+        st.markdown(f"""
+            Distribusi GP change per L1 category. Top 3 gainers: **{fmt_rp(gain_sum)}** ·
+            Top 3 losers: **{fmt_rp(loss_sum)}** · Net top 6 movers: **{fmt_rp(gain_sum + loss_sum)}**.
+        """)
+
+        # Filter
+        bl_filter = st.multiselect(
+            "Filter BL:",
+            ['Dry', 'Fresh', 'Frozen', 'PL'],
+            default=['Dry', 'Fresh', 'Frozen', 'PL'],
+            key='l1_bl_filter'
+        )
+        l1_filtered = l1[l1['pricing_bl'].isin(bl_filter)].copy()
+
+        # Display
+        l1_show = l1_filtered[['l1_category', 'pricing_bl', 'n_sku', 'gv_p1', 'gv_p2',
+                                'gp_p1', 'gp_p2', 'gp_diff', 'gp_diff_pct',
+                                'margin_p1', 'margin_p2', 'margin_diff']].copy()
+        l1_show.columns = ['L1 Category', 'BL', '# SKU', 'GV P1', 'GV P2',
+                            'GP P1', 'GP P2', 'GP Δ Rp', 'GP Δ %',
+                            'Margin P1', 'Margin P2', 'Margin Δ']
+
+        # Style: highlight top/bottom rows
+        def highlight_row(row):
+            if row['GP Δ Rp'] > 25e6:
+                return ['background-color: #ECFDF5'] * len(row)
+            elif row['GP Δ Rp'] < -25e6:
+                return ['background-color: #FEF2F2'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            l1_show.style.format({
+                '# SKU': '{:,.0f}',
+                'GV P1': '{:,.0f}', 'GV P2': '{:,.0f}',
+                'GP P1': '{:,.0f}', 'GP P2': '{:,.0f}', 'GP Δ Rp': '{:,.0f}',
+                'GP Δ %': '{:+.2%}',
+                'Margin P1': '{:.2%}', 'Margin P2': '{:.2%}', 'Margin Δ': '{:+.4f}',
+            }).apply(highlight_row, axis=1),
+            use_container_width=True, hide_index=True, height=420
+        )
+
+        # ── TABEL L1 BARU: PVM Decomposition per L1 (filter Unit + Scope) ─
+        st.markdown("##### 📊 Tabel L1 PVM Decomposition")
+        st.caption("PVM effect breakdown per L1 category. Filter unit dan scope di bawah.")
+
+        l1c1, l1c2 = st.columns([1, 1])
+        with l1c1:
+            l1_unit = st.radio(
+                "Unit:",
+                ['Rupiah (Rp)', 'Growth %', 'Margin pp', 'Margin pp terhadap Scope'],
+                horizontal=True,
+                key='l1_unit',
+            )
+            l1_mode_map = {
+                'Rupiah (Rp)': 'rp',
+                'Growth %': 'pct',
+                'Margin pp': 'pp',
+                'Margin pp terhadap Scope': 'pp_contrib',
+            }
+            l1_mode = l1_mode_map[l1_unit]
+        with l1c2:
+            l1_scope = st.radio(
+                "Scope:",
+                ['TOTAL', 'Dry', 'Fresh', 'Frozen', 'PL'],
+                horizontal=True,
+                key='l1_scope',
+            )
+
+        l1_decomp = build_l1_decomp_df(df, scope=l1_scope, mode=l1_mode)
+        if l1_decomp.empty:
+            st.info("Tidak ada data L1 untuk scope ini.")
+        else:
+            # Effect columns vary by mode
+            base_effect_cols = ['1. Churned', '2. Existing', '  2.1 COGS', '  2.2 Price',
+                                '  2.3 Vol/Mix', '3. New']
+            if l1_mode == 'pp_contrib':
+                effect_cols = base_effect_cols + ['Margin Change Effect', 'GV Weight Effect', 'Total Δ']
+            else:
+                effect_cols = base_effect_cols + ['Total Δ']
+
+            # Context columns (left side baseline + GV weight, right side end-state + GV weight)
+            if l1_mode in ('rp', 'pct'):
+                left_context_cols = ['GP P1', 'GV Weight P1']
+                right_context_cols = ['GP P2', 'GV Weight P2']
+            else:  # pp, pp_contrib
+                left_context_cols = ['Margin P1', 'GV Weight P1']
+                right_context_cols = ['Margin P2', 'GV Weight P2']
+
+            # Compute Overall row
+            overall_row = build_l1_overall_row(df, l1_scope, l1_mode, pvm)
+            if overall_row:
+                # Convert overall row to DataFrame and append
+                overall_df = pd.DataFrame([overall_row])
+                l1_full = pd.concat([l1_decomp, overall_df], ignore_index=True)
+            else:
+                l1_full = l1_decomp.copy()
+
+            # Format cells
+            def fmt_effect(v, mode_):
+                if pd.isna(v): return '—'
+                if mode_ == 'rp':
+                    return fmt_rp(v)
+                elif mode_ == 'pct':
+                    return f"{v:+.2f}%"
+                else:  # pp or pp_contrib
+                    return f"{v:+.3f}pp"
+
+            def fmt_context_left_right(v, col_name, mode_):
+                if pd.isna(v): return '—'
+                if col_name in ('GV Weight P1', 'GV Weight P2'):
+                    return f"{v*100:.2f}%"
+                elif col_name in ('GP P1', 'GP P2'):
+                    return fmt_rp(v)
+                else:  # Margin P1, Margin P2
+                    return f"{v:.2f}%"
+
+            display = l1_full.copy()
+            for col in effect_cols:
+                if col in display.columns:
+                    display[col] = display[col].apply(lambda v: fmt_effect(v, l1_mode))
+            for col in left_context_cols + right_context_cols:
+                if col in display.columns:
+                    display[col] = display.apply(lambda r: fmt_context_left_right(r[col], col, l1_mode), axis=1)
+
+            # Reorder columns: L1 | BL | left_context | effects | right_context
+            ordered_cols = ['L1 Category', 'BL'] + left_context_cols + effect_cols + right_context_cols
+            display = display[[c for c in ordered_cols if c in display.columns]]
+
+            # Gradient coloring on numeric values (effects only)
+            def style_l1_gradient(df_orig, df_disp):
+                num_cols = [c for c in effect_cols if c in df_orig.columns]
+                # Exclude Overall row from vmax calc to avoid scale issue
+                non_overall_mask = ~df_orig['L1 Category'].astype(str).str.startswith('OVERALL')
+                vals = df_orig.loc[non_overall_mask, num_cols].values.flatten()
+                vals = [v for v in vals if pd.notna(v)]
+                vmax = max(abs(v) for v in vals) if vals else 1
+                if vmax == 0: vmax = 1
+
+                def color_cell(val_numeric):
+                    if pd.isna(val_numeric): return ''
+                    norm = max(-1, min(1, val_numeric / vmax))
+                    if norm > 0:
+                        alpha = norm
+                        r = int(255 - (255-22) * alpha)
+                        g = int(255 - (255-163) * alpha)
+                        b = int(255 - (255-74) * alpha)
+                        return f'background-color: rgb({r},{g},{b}); color: #111827;'
+                    elif norm < 0:
+                        alpha = -norm
+                        r = int(255 - (255-220) * alpha)
+                        g = int(255 - (255-38) * alpha)
+                        b = int(255 - (255-38) * alpha)
+                        text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                        return f'background-color: rgb({r},{g},{b}); color: {text_color};'
+                    return ''
+
+                def apply_style(row):
+                    is_overall = str(df_orig.loc[row.name, 'L1 Category']).startswith('OVERALL')
+                    styles = []
+                    for col in df_disp.columns:
+                        if is_overall:
+                            styles.append('background-color: #DBEAFE; font-weight: 700;')
+                        elif col in num_cols:
+                            val_num = df_orig.loc[row.name, col]
+                            styles.append(color_cell(val_num))
+                        else:
+                            styles.append('')
+                    return styles
+
+                return df_disp.style.apply(apply_style, axis=1)
+
+            unit_label_l1 = {
+                'rp': 'Rupiah',
+                'pct': 'GP Growth %',
+                'pp': 'Margin pp (within L1)',
+                'pp_contrib': f'Margin pp Contribution to {l1_scope}'
+            }[l1_mode]
+            n_l1 = len(l1_decomp)
+            st.markdown(f"**Unit: {unit_label_l1} · Scope: {l1_scope}** · {n_l1} L1 categories + Overall row")
+
+            st.dataframe(
+                style_l1_gradient(l1_full, display),
+                use_container_width=True, hide_index=True, height=650
+            )
+
+            # Footer caption with methodology note
+            if l1_mode == 'pp_contrib':
+                total_mc = l1_decomp['Margin Change Effect'].sum()
+                total_gv_wt = l1_decomp['GV Weight Effect'].sum()
+                total_combined = l1_decomp['Total Δ'].sum()
+                actual_scope_pp = pvm[l1_scope]['pp_total'] * 100
+                st.caption(
+                    f"💡 **Math identity (sum-able):** Σ Margin Change Effect ({total_mc:+.3f}pp) + "
+                    f"Σ GV Weight Effect ({total_gv_wt:+.3f}pp) = "
+                    f"**{total_combined:+.3f}pp** = scope {l1_scope} actual ΔMargin "
+                    f"(**{actual_scope_pp:+.3f}pp**) ✓ exact match."
+                )
+            elif l1_mode == 'rp':
+                total_rp = l1_decomp['Total Δ'].sum()
+                actual_rp = pvm[l1_scope]['gp_end'] - pvm[l1_scope]['gp_start']
+                st.caption(
+                    f"💡 **Sum-able:** Σ L1 Rp ({fmt_rp(total_rp)}) = "
+                    f"scope {l1_scope} actual GP Δ ({fmt_rp(actual_rp)}) ✓ exact match. "
+                    f"Row Overall = Sum of all L1."
+                )
+            elif l1_mode == 'pct':
+                st.caption(
+                    f"⚠️ **Non-sum-able:** Growth % per L1 = Rp_diff / L1_GP_p1. "
+                    f"Sum of L1 growth ≠ Scope growth (denominator berbeda). "
+                    f"Row Overall = scope-level aggregate ({(pvm[l1_scope]['gp_end']-pvm[l1_scope]['gp_start'])/pvm[l1_scope]['gp_start']*100:+.2f}%), "
+                    f"dihitung fresh dari scope totals."
+                )
+            else:  # pp
+                st.caption(
+                    f"⚠️ **Non-sum-able:** Margin pp per L1 = m_end_L1 - m_base_L1. "
+                    f"Setiap L1 punya base margin berbeda, sum of pp tanpa weighting = meaningless. "
+                    f"Row Overall = scope-level aggregate margin change ({pvm[l1_scope]['pp_total']*100:+.3f}pp), "
+                    f"dihitung dari scope's aggregate margin (bukan sum of L1)."
+                )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ZONE 4.5 — TOP MOVERS (3 SECTIONS: GP / PRICE / COGS)
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">🔝 Top Movers (Existing SKU only)</div>', unsafe_allow_html=True)
+    st.caption("Per-SKU decomposition: COGS + Price + Vol/Mix Effect sum to GP Δ. "
+               "Note: di per-SKU level, Vol/Mix Effect = qty change × unit margin P2 (pure volume; "
+               "mix shift hanya bermakna di aggregate level).")
+
+    name_col = 'product_name' if 'product_name' in df.columns else ('sku_name' if 'sku_name' in df.columns else None)
+    id_col = 'product_id' if 'product_id' in df.columns else ('sku_id' if 'sku_id' in df.columns else None)
+
+    def mover_table_full(d):
+        """Build full table with decomposition + Δ Rp + Growth % + Margin P1→P2."""
+        rows = []
+        for i, (_, r) in enumerate(d.iterrows(), 1):
+            name = r.get(name_col, '—') if name_col else '—'
+            bl = r.get('pricing_bl', '—')
+            l1 = r.get('l1_category', '—')
+
+            gp_d = r.get('gp_diff', 0)
+            cogs_eff = r.get('cogs_effect', 0)
+            price_eff = r.get('price_effect', 0)
+            volmix_eff = r.get('volmix_effect', 0)
+            gp_growth = r.get('gp_growth_pct', np.nan)
+
+            price_diff_rp = r.get('price_diff_rp', 0)
+            price_diff_pct = r.get('price_diff_pct', np.nan)
+            cogs_diff_rp = r.get('cogs_diff_rp', 0)
+            cogs_diff_pct = r.get('cogs_diff_pct', np.nan)
+
+            # Margin P1 → P2
+            mgn_p1 = r.get('margin_p1_pct', np.nan)
+            mgn_p2 = r.get('margin_p2_pct', np.nan)
+            if pd.notna(mgn_p1) and pd.notna(mgn_p2):
+                mgn_txt = f"{mgn_p1:.1f}% → {mgn_p2:.1f}%"
+            else:
+                mgn_txt = "—"
+
+            qty_pct = r.get('qty_diff_pct', np.nan)
+            comp_s = r.get('comp_status', '—') or '—'
+
+            # Avg Stock + OOS detection
+            stock_p1 = r.get('avg_stock_p1', np.nan)
+            stock_p2 = r.get('avg_stock_p2', np.nan)
+            stock_growth = r.get('avg_stock_growth_pct', np.nan)
+            # OOS flag: stock_growth <= -10% → driver auto-fill
+            if pd.notna(stock_growth) and stock_growth <= -10:
+                driver_txt = "⚠️ OOS risk"
+            else:
+                driver_txt = ''
+
+            pi_p1 = r.get('pi_p1', np.nan)
+            pi_p2 = r.get('pi_p2', np.nan)
+            pi_txt = f"{pi_p1:.0f}→{pi_p2:.0f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—"
+
+            rows.append({
+                '#': i,
+                'Product': str(name)[:35],
+                'BL': bl,
+                'L1': l1,
+                'GP Δ Rp': gp_d,
+                'COGS Effect': cogs_eff,
+                'Price Effect': price_eff,
+                'Vol/Mix Effect': volmix_eff,
+                'GP Growth %': gp_growth,
+                'Mgn P1 → P2': mgn_txt,
+                'Price Δ Rp': price_diff_rp,
+                'Price Δ%': price_diff_pct,
+                'COGS Δ Rp': cogs_diff_rp,
+                'COGS Δ%': cogs_diff_pct,
+                'Qty Δ%': qty_pct,
+                'Stock P1': stock_p1,
+                'Stock P2': stock_p2,
+                'Stock Growth %': stock_growth,
+                'Comp': comp_s,
+                'PI': pi_txt,
+                'Driver': driver_txt,
+            })
+        return pd.DataFrame(rows)
+
+    fmt_movers = {
+        'GP Δ Rp': '{:+,.0f}',
+        'COGS Effect': '{:+,.0f}',
+        'Price Effect': '{:+,.0f}',
+        'Vol/Mix Effect': '{:+,.0f}',
+        'GP Growth %': '{:+.1f}%',
+        'Price Δ Rp': '{:+,.0f}',
+        'Price Δ%': '{:+.2%}',
+        'COGS Δ Rp': '{:+,.0f}',
+        'COGS Δ%': '{:+.2%}',
+        'Qty Δ%': '{:+.1%}',
+        'Stock P1': '{:,.0f}',
+        'Stock P2': '{:,.0f}',
+        'Stock Growth %': '{:+.1f}%',
+    }
+
+    # ── SECTION A: TOP GP MOVERS ────────────────────────────────────────
+    st.markdown("### A. Top 30 GP Movers")
+    gp_gainers, gp_losers = compute_top_movers_gp(df, n=30)
+    mv_a1, mv_a2 = st.columns(2)
+    with mv_a1:
+        st.markdown("**🟢 Top 30 GP Gainers**")
+        df_a1 = mover_table_full(gp_gainers)
+        st.dataframe(df_a1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+    with mv_a2:
+        st.markdown("**🔴 Top 30 GP Losers**")
+        df_a2 = mover_table_full(gp_losers)
+        st.dataframe(df_a2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+
+    # ── SECTION B: TOP PRICE MOVERS ─────────────────────────────────────
+    st.markdown("### B. Top 30 Price Movers")
+    price_ups, price_downs = compute_top_movers_price(df, n=30)
+    mv_b1, mv_b2 = st.columns(2)
+    with mv_b1:
+        st.markdown("**🔼 Top 30 Price Up**")
+        df_b1 = mover_table_full(price_ups)
+        st.dataframe(df_b1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+    with mv_b2:
+        st.markdown("**🔽 Top 30 Price Down**")
+        df_b2 = mover_table_full(price_downs)
+        st.dataframe(df_b2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+
+    # ── SECTION C: TOP COGS MOVERS ──────────────────────────────────────
+    st.markdown("### C. Top 30 COGS Movers")
+    cogs_ups, cogs_downs = compute_top_movers_cogs(df, n=30)
+    mv_c1, mv_c2 = st.columns(2)
+    with mv_c1:
+        st.markdown("**🔼 Top 30 COGS Up**")
+        df_c1 = mover_table_full(cogs_ups)
+        st.dataframe(df_c1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+    with mv_c2:
+        st.markdown("**🔽 Top 30 COGS Down**")
+        df_c2 = mover_table_full(cogs_downs)
+        st.dataframe(df_c2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ZONE 5 — SKU WATCH LIST (PRIORITY)
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">5️⃣ SKU Watch List — Priority</div>', unsafe_allow_html=True)
+
+    priority = compute_watch_priority(df)
+    n_priority = len(priority)
+
+    # Also get Review/Adjust/Framework counts for context
+    n_review = (df['flag_price'].isin(['Review', 'Adjust'])).sum() if 'flag_price' in df.columns else 0
+    n_framework_check = (df['framework_check'] == True).sum() if 'framework_check' in df.columns else 0
+
+    st.markdown(f"""
+        Hari ini ada **{n_priority} SKU Priority** yang butuh attention urgent.
+        Definisi Priority: (COGS↑ + Comp↑ + Price flat = room to raise) ATAU (COGS↓ + Comp↓ + Price flat = room to drop).
+    """)
+
+    if n_priority == 0:
+        st.info("Tidak ada SKU Priority. ✅")
+    else:
+        # Display priority SKUs
+        wl_cols = ['product_id', 'product_name', 'pricing_bl', 'l1_category',
+                   'price_status', 'cogs_status', 'comp_status',
+                   'price_p1', 'price_p2', 'cogs_p1', 'cogs_p2',
+                   'comp_price_p1', 'comp_price_p2', 'pi_p1', 'pi_p2',
+                   'gp_p1', 'gp_p2', 'gp_diff']
+        wl_cols = [c for c in wl_cols if c in priority.columns]
+        wl = priority[wl_cols].copy()
+
+        # Add suggested action
+        def suggest_action(r):
+            if r.get('cogs_status') == 'Up' and r.get('comp_status') == 'Up':
+                return '🔼 Raise price'
+            if r.get('cogs_status') == 'Drop' and r.get('comp_status') == 'Drop':
+                return '🔽 Drop price'
+            return '—'
+        wl['Suggested Action'] = wl.apply(suggest_action, axis=1)
+
+        rename_map = {
+            'product_id': 'SKU ID', 'product_name': 'Product', 'pricing_bl': 'BL', 'l1_category': 'L1',
+            'price_status': 'Price', 'cogs_status': 'COGS', 'comp_status': 'Comp',
+            'price_p1': 'Price P1', 'price_p2': 'Price P2',
+            'cogs_p1': 'COGS P1', 'cogs_p2': 'COGS P2',
+            'comp_price_p1': 'Comp P1', 'comp_price_p2': 'Comp P2',
+            'pi_p1': 'PI P1', 'pi_p2': 'PI P2',
+            'gp_p1': 'GP P1', 'gp_p2': 'GP P2', 'gp_diff': 'GP Δ',
+        }
+        wl = wl.rename(columns=rename_map)
+
+        st.dataframe(
+            wl.style.format({
+                'Price P1': '{:,.0f}', 'Price P2': '{:,.0f}',
+                'COGS P1': '{:,.0f}', 'COGS P2': '{:,.0f}',
+                'Comp P1': '{:,.0f}', 'Comp P2': '{:,.0f}',
+                'PI P1': '{:.1f}', 'PI P2': '{:.1f}',
+                'GP P1': '{:,.0f}', 'GP P2': '{:,.0f}', 'GP Δ': '{:+,.0f}',
+            }),
+            use_container_width=True, hide_index=True, height=400
+        )
+
+    st.caption(f"📌 Total dari sheet 7 SKU Watch List: **{n_priority} Priority** · "
+               f"{n_review} Review/Adjust · {n_framework_check} Framework Check. "
+               f"Download Full Excel di bawah untuk akses lengkap.")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # DOWNLOAD FULL EXCEL
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">💾 Download Output</div>', unsafe_allow_html=True)
+    st.caption(f"File output: 12 sheet identical dengan `pvm_analyzer_v3.py`. Size: {len(A['excel_bytes'])/1024/1024:.1f} MB.")
     st.download_button(
-        "📥 Download Excel (13 sheets)",
-        data=excel_buffer,
-        file_name=out_name,
+        f"📥 Download Full Excel ({p1}_vs_{p2}_enriched.xlsx)",
+        data=A['excel_bytes'],
+        file_name=f"{p1}_vs_{p2}_enriched.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=False,
-        key='pi_excel_download'
     )
 
 else:
-    st.info("⬆️ Upload file PI raw data untuk mulai analisis. Format mengikuti `pi_analyzer_v1.py`.")
+    # No data state
+    st.info("👆 Upload file Excel atau CSV untuk mulai analisis. Klik **Download Template** kalau butuh contoh format.")
