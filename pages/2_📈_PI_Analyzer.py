@@ -578,7 +578,9 @@ def build_top_movers_pi(df, n=30):
 
 
 def fmt_mover_row(r, idx):
-    """Format single row for mover table display. Includes before/after for price, comp, COGS."""
+    """Format single row for mover table display.
+    Each dimension (Price, Comp, COGS) has 3 separate columns: P1, P2, Δ%.
+    """
     pi_p1 = r.get('pi', np.nan)
     pi_p2 = r.get('next_pi', np.nan)
     mgn_p1 = r.get('margin_pct_prev', np.nan)
@@ -587,21 +589,20 @@ def fmt_mover_row(r, idx):
     # Price before/after
     price_p1 = r.get('price', np.nan)
     price_p2 = r.get('next_price', np.nan)
+    price_diff_pct = ((price_p2 - price_p1) / price_p1) if (pd.notna(price_p1) and pd.notna(price_p2) and price_p1 != 0) else np.nan
 
-    # Competitor BLENDED price before/after (comp_price = blended effective comp)
+    # Competitor BLENDED price before/after
     comp_p1 = r.get('comp_price', np.nan)
     comp_p2 = r.get('next_comp_price', np.nan)
+    comp_diff_pct = ((comp_p2 - comp_p1) / comp_p1) if (pd.notna(comp_p1) and pd.notna(comp_p2) and comp_p1 != 0) else np.nan
 
     # COGS before/after
     cogs_p1 = r.get('cogs', np.nan)
     cogs_p2 = r.get('next_cogs', np.nan)
+    cogs_diff_pct = ((cogs_p2 - cogs_p1) / cogs_p1) if (pd.notna(cogs_p1) and pd.notna(cogs_p2) and cogs_p1 != 0) else np.nan
 
-    def fmt_pair(v1, v2, decimals=0):
-        if pd.notna(v1) and pd.notna(v2):
-            if decimals == 0:
-                return f"{v1:,.0f} → {v2:,.0f}"
-            return f"{v1:,.{decimals}f} → {v2:,.{decimals}f}"
-        return "—"
+    def fmt_n(v):
+        return f"{v:,.0f}" if pd.notna(v) else "—"
 
     return {
         '#': idx,
@@ -610,15 +611,26 @@ def fmt_mover_row(r, idx):
         'L1': r.get('l1_category_name', '—'),
         'PI P1 → P2': f"{pi_p1:.1f} → {pi_p2:.1f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—",
         'Δ PI': r.get('diff_pi', 0),
-        'Price P1 → P2':  fmt_pair(price_p1, price_p2),
-        'Comp P1 → P2':   fmt_pair(comp_p1, comp_p2),
-        'COGS P1 → P2':   fmt_pair(cogs_p1, cogs_p2),
+        # Price (3 cols)
+        'Price P1':    fmt_n(price_p1),
+        'Price P2':    fmt_n(price_p2),
+        'Price Δ%':    price_diff_pct,
+        # Comp Blended (3 cols)
+        'Comp P1':     fmt_n(comp_p1),
+        'Comp P2':     fmt_n(comp_p2),
+        'Comp Δ%':     comp_diff_pct,
+        # COGS (3 cols)
+        'COGS P1':     fmt_n(cogs_p1),
+        'COGS P2':     fmt_n(cogs_p2),
+        'COGS Δ%':     cogs_diff_pct,
+        # Margin
         'Mgn P1 → P2': f"{mgn_p1*100:.1f}% → {mgn_p2*100:.1f}%" if pd.notna(mgn_p1) and pd.notna(mgn_p2) else "—",
-        'Price Eff': r.get('eff_price', 0),
-        'Comp Price Eff': r.get('eff_comp', 0),
+        # Effects
+        'Price Eff':       r.get('eff_price', 0),
+        'Comp Price Eff':  r.get('eff_comp', 0),
         'Normal Comp Eff': r.get('eff_normal_comp', 0),
         'Discount Comp Eff': r.get('eff_discount_comp', 0),
-        'Framework': r.get('framework_check', '') or '',
+        'Framework':       r.get('framework_check', '') or '',
     }
 
 
@@ -1450,6 +1462,9 @@ if st.session_state.pi_analysis is not None:
 
     fmt_mover = {
         'Δ PI': '{:+.2f}',
+        'Price Δ%':  '{:+.2%}',
+        'Comp Δ%':   '{:+.2%}',
+        'COGS Δ%':   '{:+.2%}',
         'Price Eff': '{:+.3f}',
         'Comp Price Eff': '{:+.3f}',
         'Normal Comp Eff': '{:+.3f}',
