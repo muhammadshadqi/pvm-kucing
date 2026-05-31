@@ -299,69 +299,107 @@ def make_tornado_chart(pvm, scope='TOTAL', mode='rp'):
     return fig
 
 
-def make_heatmap_matrix(pvm, mode='rp'):
+def build_margin_pp_bridge_df(pvm):
     """
-    Heatmap matrix: rows = BL, cols = drivers. Color = magnitude with diverging palette.
-    Cells show formatted numeric value.
+    Tabel 1B style Sheet 2 — Margin pp Bridge per BL.
+    Rows: Margin P1 Start, Churned, Existing (sum 2.1+2.2+2.3), 2.1 COGS, 2.2 Price, 2.3 Vol/Mix,
+          New SKU, Total Δ, Margin P2 End.
+    Cols: Dry, Fresh, Frozen, PL, Overall, GV Reference.
+    Returns: pd.DataFrame ready for st.dataframe display.
     """
     bls = ['Dry', 'Fresh', 'Frozen', 'PL', 'TOTAL']
-    drivers = ['1. Churned', '2.1 COGS', '2.2 Price', '2.3 Vol/Mix', '3. New SKU', 'Total Δ']
+    rows = []
 
-    matrix = []
-    text_matrix = []
-    for bl in bls:
-        d = pvm[bl]
-        if mode == 'rp':
-            row = [-d['gp_dep'], d['cogs_rp'], d['price_rp'], d['volmix_rp'], d['gp_new'],
-                   d['gp_end'] - d['gp_start']]
-            row_text = [fmt_rp(v) for v in row]
-        elif mode == 'pp':
-            row = [d['pp_B']*100, d['pp_cogs']*100, d['pp_price']*100, d['pp_volmix']*100,
-                   d['pp_G']*100, d['pp_total']*100]
-            row_text = [f"{v:+.3f}pp" for v in row]
-        else:  # pct
-            gp_p1 = d['gp_start'] if d['gp_start'] else 1
-            row = [(-d['gp_dep'])/gp_p1*100, d['cogs_rp']/gp_p1*100, d['price_rp']/gp_p1*100,
-                   d['volmix_rp']/gp_p1*100, d['gp_new']/gp_p1*100,
-                   (d['gp_end']-d['gp_start'])/gp_p1*100]
-            row_text = [f"{v:+.2f}%" for v in row]
-        matrix.append(row)
-        text_matrix.append(row_text)
+    # Row 1: Margin P1 — Start (all SKU)
+    rows.append(['Margin P1 — Start (all SKU)'] +
+                [pvm[bl]['m_base'] * 100 for bl in bls] +
+                ['GV P1 all'])
 
-    # Determine color scale range (symmetric around 0)
-    flat = [v for row in matrix for v in row]
-    vmax = max(abs(min(flat)), abs(max(flat))) if flat else 1
+    # Row 2: 1. Churned SKU Effect
+    rows.append(['1. Churned SKU Effect'] +
+                [pvm[bl]['pp_B'] * 100 for bl in bls] +
+                ['GV existing P1'])
 
-    fig = go.Figure(go.Heatmap(
-        z=matrix,
-        x=drivers,
-        y=bls,
-        text=text_matrix,
-        texttemplate="%{text}",
-        textfont={"size": 11, "color": "#111827"},
-        colorscale=[
-            [0, '#FCA5A5'],     # red (negative)
-            [0.5, '#FFFFFF'],   # white (zero)
-            [1, '#86EFAC'],     # green (positive)
-        ],
-        zmid=0,
-        zmin=-vmax,
-        zmax=vmax,
-        showscale=False,
-        xgap=2,
-        ygap=2,
-    ))
+    # Row 3: 2. Existing SKU Effect (sum of 2.1+2.2+2.3)
+    rows.append(['2. Existing SKU Effect'] +
+                [(pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']) * 100 for bl in bls] +
+                ['Sum of 2.1+2.2+2.3'])
 
-    unit_label = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'GP Growth %'}[mode]
-    fig.update_layout(
-        title=f"Heatmap: BL × Driver ({unit_label})",
-        height=320,
-        margin=dict(l=20, r=20, t=50, b=40),
-        plot_bgcolor='white',
-        xaxis=dict(tickangle=-15, side='top'),
-    )
-    fig.update_yaxes(autorange='reversed')  # TOTAL at bottom
-    return fig
+    # Row 4: 2.1 COGS Effect
+    rows.append(['  2.1 COGS Effect'] +
+                [pvm[bl]['pp_cogs'] * 100 for bl in bls] +
+                ['GV_hyp1 = q1×p1'])
+
+    # Row 5: 2.2 Price Effect
+    rows.append(['  2.2 Price Effect'] +
+                [pvm[bl]['pp_price'] * 100 for bl in bls] +
+                ['GV_hyp2 = q1×p2'])
+
+    # Row 6: 2.3 Vol/Mix Effect
+    rows.append(['  2.3 Vol/Mix Effect'] +
+                [pvm[bl]['pp_volmix'] * 100 for bl in bls] +
+                ['GV actual existing P2'])
+
+    # Row 7: 3. New SKU Effect
+    rows.append(['3. New SKU Effect'] +
+                [pvm[bl]['pp_G'] * 100 for bl in bls] +
+                ['GV P2 all'])
+
+    # Row 8: Total Margin Change
+    rows.append(['Total Margin Change'] +
+                [pvm[bl]['pp_total'] * 100 for bl in bls] +
+                ['End - Start'])
+
+    # Row 9: Margin P2 — End (all SKU)
+    rows.append(['Margin P2 — End (all SKU)'] +
+                [pvm[bl]['m_end'] * 100 for bl in bls] +
+                ['GV P2 all'])
+
+    cols = ['Step', 'Dry', 'Fresh', 'Frozen', 'PL', 'Overall', 'GV Reference']
+    return pd.DataFrame(rows, columns=cols)
+
+
+def build_bl_contribution_df(pvm):
+    """
+    Tabel 2 — BL Contribution to Overall margin change (GV-weighted).
+    Formula: BL_contrib_pp = BL_pp × (BL_GV_P2 / Total_GV_P2)
+    Sum-up: sum across BL = Overall pp value (mathematical identity).
+    Rows: 1. Churned, 2. Existing (sum), 2.1 COGS, 2.2 Price, 2.3 Vol/Mix, 3. New SKU, Total Δ.
+    Cols: Dry contrib, Fresh contrib, Frozen contrib, PL contrib, Overall.
+    """
+    bls = ['Dry', 'Fresh', 'Frozen', 'PL']
+    total_gv_p2 = sum(pvm[bl]['gv_end'] for bl in bls)
+    if total_gv_p2 == 0:
+        weights = {bl: 0 for bl in bls}
+    else:
+        weights = {bl: pvm[bl]['gv_end'] / total_gv_p2 for bl in bls}
+
+    rows = []
+    steps = [
+        ('1. Churned SKU Effect', 'pp_B'),
+        ('2. Existing SKU Effect', '__existing__'),  # sum of 2.1+2.2+2.3
+        ('  2.1 COGS Effect', 'pp_cogs'),
+        ('  2.2 Price Effect', 'pp_price'),
+        ('  2.3 Vol/Mix Effect', 'pp_volmix'),
+        ('3. New SKU Effect', 'pp_G'),
+        ('Total Margin Change', 'pp_total'),
+    ]
+    for label, key in steps:
+        row = [label]
+        for bl in bls:
+            if key == '__existing__':
+                bl_pp = pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']
+            else:
+                bl_pp = pvm[bl][key]
+            contrib = bl_pp * weights[bl] * 100
+            row.append(contrib)
+        # Overall = sum of all BL contributions
+        row.append(sum(row[1:]))
+        rows.append(row)
+
+    cols = ['Step', 'Dry contrib', 'Fresh contrib', 'Frozen contrib', 'PL contrib', 'Overall']
+    return pd.DataFrame(rows, columns=cols)
+
 
 
 def compute_l1_breakdown(df):
@@ -412,6 +450,10 @@ def _enrich_existing_with_effects(df):
     # Δ Rp (nominal per-unit changes)
     existing['price_diff_rp'] = p2 - p1
     existing['cogs_diff_rp'] = c2 - c1
+
+    # Per-SKU margin P1, P2 (unit margin)
+    existing['margin_p1_pct'] = np.where(p1 > 0, (p1 - c1) / p1 * 100, np.nan)
+    existing['margin_p2_pct'] = np.where(p2 > 0, (p2 - c2) / p2 * 100, np.nan)
 
     # Growth % = sku_gp_diff / sku_gp_p1 (per-SKU growth)
     gp1 = existing['gp_p1'].replace(0, np.nan)
@@ -819,7 +861,7 @@ if st.session_state.analysis is not None:
         ), unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────
-    # ZONE 3 — MARGIN BRIDGE (Tornado + Heatmap)
+    # ZONE 3 — MARGIN BRIDGE (Tornado + 2 Tables)
     # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">3️⃣ Margin Bridge</div>', unsafe_allow_html=True)
 
@@ -875,13 +917,109 @@ if st.session_state.analysis is not None:
     fig_tornado = make_tornado_chart(pvm, scope=scope, mode=mode_key)
     st.plotly_chart(fig_tornado, use_container_width=True)
 
-    # Heatmap matrix (expanded default per user)
-    st.markdown("**Heatmap: BL × Driver** — quick view siapa yang paling buruk di BL mana")
-    fig_heatmap = make_heatmap_matrix(pvm, mode=mode_key)
-    st.plotly_chart(fig_heatmap, use_container_width=True)
+    # ── TABEL 1: Margin pp Bridge per BL (Style Sheet 2) ─────────────────
+    st.markdown("##### 📊 Tabel 1: Margin pp Bridge per BL")
+    st.caption("Margin pp **dalam** masing-masing BL (un-weighted). Bisa lihat before-after margin per BL.")
 
-    # Per-BL contribution table below
-    with st.expander("📋 Breakdown numerical (semua BL)", expanded=False):
+    bridge_df = build_margin_pp_bridge_df(pvm)
+    # Format pp columns
+    bl_cols = ['Dry', 'Fresh', 'Frozen', 'PL', 'Overall']
+
+    def style_bridge_table(row):
+        """Color rows: gray for start/end/total, light bg for sub-rows."""
+        styles = []
+        label = row['Step']
+        if 'Margin P1' in label or 'Margin P2' in label:
+            base = 'background-color: #E5E7EB; font-weight: 700;'
+        elif 'Total Margin' in label:
+            base = 'background-color: #DBEAFE; font-weight: 700;'
+        elif '1. Churned' in label:
+            base = 'background-color: #FEE2E2;'
+        elif '2. Existing' in label:
+            base = 'background-color: #FEF3C7; font-weight: 600;'
+        elif '2.1 COGS' in label:
+            base = 'background-color: #FFF7ED;'
+        elif '2.2 Price' in label:
+            base = 'background-color: #EFF6FF;'
+        elif '2.3 Vol/Mix' in label:
+            base = 'background-color: #F3E8FF;'
+        elif '3. New' in label:
+            base = 'background-color: #DCFCE7;'
+        else:
+            base = ''
+        return [base] * len(row)
+
+    def fmt_pp_cell(v):
+        """Format pp number with sign, except for Margin Start/End which are absolute %."""
+        if isinstance(v, str):
+            return v
+        try:
+            return f"{v:+.3f}pp"
+        except (TypeError, ValueError):
+            return v
+
+    # Build display df with conditional formatting per row type
+    def format_bridge_df(df_):
+        out_rows = []
+        for _, row in df_.iterrows():
+            label = row['Step']
+            is_abs_margin = 'Margin P1' in label or 'Margin P2' in label
+            new_row = {'Step': label}
+            for col in bl_cols:
+                v = row[col]
+                if is_abs_margin:
+                    new_row[col] = f"{v:.2f}%"
+                else:
+                    new_row[col] = f"{v:+.3f}pp"
+            new_row['GV Reference'] = row['GV Reference']
+            out_rows.append(new_row)
+        return pd.DataFrame(out_rows)
+
+    bridge_display = format_bridge_df(bridge_df)
+    st.dataframe(
+        bridge_display.style.apply(style_bridge_table, axis=1),
+        use_container_width=True, hide_index=True
+    )
+
+    # ── TABEL 2: BL Contribution to Overall (GV-weighted) ────────────────
+    st.markdown("##### 📊 Tabel 2: BL Contribution to Overall Margin Change")
+    st.caption("Margin pp **BL-weighted** (× GV share P2). **Sum of all BL contributions = Overall pp.** "
+               "Reading: 'BL X kontribusi ke overall margin change sebesar Y pp'.")
+
+    contrib_df = build_bl_contribution_df(pvm)
+    contrib_bl_cols = ['Dry contrib', 'Fresh contrib', 'Frozen contrib', 'PL contrib', 'Overall']
+
+    def style_contrib_table(row):
+        label = row['Step']
+        if 'Total Margin' in label:
+            base = 'background-color: #DBEAFE; font-weight: 700;'
+        elif '1. Churned' in label:
+            base = 'background-color: #FEE2E2;'
+        elif '2. Existing' in label:
+            base = 'background-color: #FEF3C7; font-weight: 600;'
+        elif '2.1 COGS' in label:
+            base = 'background-color: #FFF7ED;'
+        elif '2.2 Price' in label:
+            base = 'background-color: #EFF6FF;'
+        elif '2.3 Vol/Mix' in label:
+            base = 'background-color: #F3E8FF;'
+        elif '3. New' in label:
+            base = 'background-color: #DCFCE7;'
+        else:
+            base = ''
+        return [base] * len(row)
+
+    contrib_display = contrib_df.copy()
+    for col in contrib_bl_cols:
+        contrib_display[col] = contrib_display[col].apply(lambda v: f"{v:+.3f}pp")
+
+    st.dataframe(
+        contrib_display.style.apply(style_contrib_table, axis=1),
+        use_container_width=True, hide_index=True
+    )
+
+    # Per-BL contribution table below (Rp + Growth %)
+    with st.expander("📋 Breakdown numerical Rp (semua BL)", expanded=False):
         bridge_data = []
         for bl in ['TOTAL'] + BL_ORDER:
             d = pvm[bl]
@@ -983,7 +1121,7 @@ if st.session_state.analysis is not None:
     id_col = 'product_id' if 'product_id' in df.columns else ('sku_id' if 'sku_id' in df.columns else None)
 
     def mover_table_full(d):
-        """Build full table with decomposition + Δ Rp + Growth %."""
+        """Build full table with decomposition + Δ Rp + Growth % + Margin P1→P2."""
         rows = []
         for i, (_, r) in enumerate(d.iterrows(), 1):
             name = r.get(name_col, '—') if name_col else '—'
@@ -1000,6 +1138,14 @@ if st.session_state.analysis is not None:
             price_diff_pct = r.get('price_diff_pct', np.nan)
             cogs_diff_rp = r.get('cogs_diff_rp', 0)
             cogs_diff_pct = r.get('cogs_diff_pct', np.nan)
+
+            # Margin P1 → P2
+            mgn_p1 = r.get('margin_p1_pct', np.nan)
+            mgn_p2 = r.get('margin_p2_pct', np.nan)
+            if pd.notna(mgn_p1) and pd.notna(mgn_p2):
+                mgn_txt = f"{mgn_p1:.1f}% → {mgn_p2:.1f}%"
+            else:
+                mgn_txt = "—"
 
             qty_pct = r.get('qty_diff_pct', np.nan)
             comp_s = r.get('comp_status', '—') or '—'
@@ -1018,6 +1164,7 @@ if st.session_state.analysis is not None:
                 'Price Effect': price_eff,
                 'Vol/Mix Effect': volmix_eff,
                 'GP Growth %': gp_growth,
+                'Mgn P1 → P2': mgn_txt,
                 'Price Δ Rp': price_diff_rp,
                 'Price Δ%': price_diff_pct,
                 'COGS Δ Rp': cogs_diff_rp,
@@ -1043,43 +1190,43 @@ if st.session_state.analysis is not None:
     }
 
     # ── SECTION A: TOP GP MOVERS ────────────────────────────────────────
-    st.markdown("### A. Top 10 GP Movers")
-    gp_gainers, gp_losers = compute_top_movers_gp(df, n=10)
+    st.markdown("### A. Top 30 GP Movers")
+    gp_gainers, gp_losers = compute_top_movers_gp(df, n=30)
     mv_a1, mv_a2 = st.columns(2)
     with mv_a1:
-        st.markdown("**🟢 Top 10 GP Gainers**")
+        st.markdown("**🟢 Top 30 GP Gainers**")
         df_a1 = mover_table_full(gp_gainers)
-        st.dataframe(df_a1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_a1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
     with mv_a2:
-        st.markdown("**🔴 Top 10 GP Losers**")
+        st.markdown("**🔴 Top 30 GP Losers**")
         df_a2 = mover_table_full(gp_losers)
-        st.dataframe(df_a2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_a2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
 
     # ── SECTION B: TOP PRICE MOVERS ─────────────────────────────────────
-    st.markdown("### B. Top 10 Price Movers")
-    price_ups, price_downs = compute_top_movers_price(df, n=10)
+    st.markdown("### B. Top 30 Price Movers")
+    price_ups, price_downs = compute_top_movers_price(df, n=30)
     mv_b1, mv_b2 = st.columns(2)
     with mv_b1:
-        st.markdown("**🔼 Top 10 Price Up**")
+        st.markdown("**🔼 Top 30 Price Up**")
         df_b1 = mover_table_full(price_ups)
-        st.dataframe(df_b1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_b1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
     with mv_b2:
-        st.markdown("**🔽 Top 10 Price Down**")
+        st.markdown("**🔽 Top 30 Price Down**")
         df_b2 = mover_table_full(price_downs)
-        st.dataframe(df_b2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_b2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
 
     # ── SECTION C: TOP COGS MOVERS ──────────────────────────────────────
-    st.markdown("### C. Top 10 COGS Movers")
-    cogs_ups, cogs_downs = compute_top_movers_cogs(df, n=10)
+    st.markdown("### C. Top 30 COGS Movers")
+    cogs_ups, cogs_downs = compute_top_movers_cogs(df, n=30)
     mv_c1, mv_c2 = st.columns(2)
     with mv_c1:
-        st.markdown("**🔼 Top 10 COGS Up**")
+        st.markdown("**🔼 Top 30 COGS Up**")
         df_c1 = mover_table_full(cogs_ups)
-        st.dataframe(df_c1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_c1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
     with mv_c2:
-        st.markdown("**🔽 Top 10 COGS Down**")
+        st.markdown("**🔽 Top 30 COGS Down**")
         df_c2 = mover_table_full(cogs_downs)
-        st.dataframe(df_c2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+        st.dataframe(df_c2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=600)
 
     # ─────────────────────────────────────────────────────────────────────
     # ZONE 5 — SKU WATCH LIST (PRIORITY)
