@@ -299,63 +299,108 @@ def make_tornado_chart(pvm, scope='TOTAL', mode='rp'):
     return fig
 
 
-def build_margin_pp_bridge_df(pvm):
+def build_margin_pp_bridge_df(pvm, mode='pp'):
     """
-    Tabel 1B style Sheet 2 — Margin pp Bridge per BL.
-    Rows: Margin P1 Start, Churned, Existing (sum 2.1+2.2+2.3), 2.1 COGS, 2.2 Price, 2.3 Vol/Mix,
-          New SKU, Total Δ, Margin P2 End.
-    Cols: Dry, Fresh, Frozen, PL, Overall, GV Reference.
-    Returns: pd.DataFrame ready for st.dataframe display.
+    Tabel 1B style Sheet 2 — Margin Bridge per BL.
+    mode:
+      - 'pp' (default): Margin pp per BL. Start/End rows show absolute margin %.
+      - 'rp': Rupiah. Start/End rows show GP P1 / GP P2 (Rupiah). Effect rows show Rp.
+      - 'pct': Growth %. Start/End rows show '—' (no growth concept for absolute baseline)
+               and add 'GP P1 → P2' summary; effect rows show step_Rp / GP_P1 × 100%.
     """
     bls = ['Dry', 'Fresh', 'Frozen', 'PL', 'TOTAL']
     rows = []
 
-    # Row 1: Margin P1 — Start (all SKU)
-    rows.append(['Margin P1 — Start (all SKU)'] +
-                [pvm[bl]['m_base'] * 100 for bl in bls] +
-                ['GV P1 all'])
+    if mode == 'pp':
+        rows.append(['Margin P1 — Start (all SKU)'] +
+                    [pvm[bl]['m_base'] * 100 for bl in bls] +
+                    ['GV P1 all'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [pvm[bl]['pp_B'] * 100 for bl in bls] +
+                    ['GV existing P1'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [(pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']) * 100 for bl in bls] +
+                    ['Sum of 2.1+2.2+2.3'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [pvm[bl]['pp_cogs'] * 100 for bl in bls] +
+                    ['GV_hyp1 = q1×p1'])
+        rows.append(['  2.2 Price Effect'] +
+                    [pvm[bl]['pp_price'] * 100 for bl in bls] +
+                    ['GV_hyp2 = q1×p2'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [pvm[bl]['pp_volmix'] * 100 for bl in bls] +
+                    ['GV actual existing P2'])
+        rows.append(['3. New SKU Effect'] +
+                    [pvm[bl]['pp_G'] * 100 for bl in bls] +
+                    ['GV P2 all'])
+        rows.append(['Total Margin Change'] +
+                    [pvm[bl]['pp_total'] * 100 for bl in bls] +
+                    ['End - Start'])
+        rows.append(['Margin P2 — End (all SKU)'] +
+                    [pvm[bl]['m_end'] * 100 for bl in bls] +
+                    ['GV P2 all'])
+    elif mode == 'rp':
+        rows.append(['GP P1 — Start (all SKU)'] +
+                    [pvm[bl]['gp_start'] for bl in bls] +
+                    ['GP P1 all'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [-pvm[bl]['gp_dep'] for bl in bls] +
+                    ['Removed SKU P1 GP'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [pvm[bl]['cogs_rp'] + pvm[bl]['price_rp'] + pvm[bl]['volmix_rp'] for bl in bls] +
+                    ['Sum of 2.1+2.2+2.3'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [pvm[bl]['cogs_rp'] for bl in bls] +
+                    ['q1 × (c1 - c2)'])
+        rows.append(['  2.2 Price Effect'] +
+                    [pvm[bl]['price_rp'] for bl in bls] +
+                    ['q1 × (p2 - p1)'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [pvm[bl]['volmix_rp'] for bl in bls] +
+                    ['(q2-q1) × (p2-c2)'])
+        rows.append(['3. New SKU Effect'] +
+                    [pvm[bl]['gp_new'] for bl in bls] +
+                    ['New SKU P2 GP'])
+        rows.append(['Total GP Change'] +
+                    [pvm[bl]['gp_end'] - pvm[bl]['gp_start'] for bl in bls] +
+                    ['End - Start'])
+        rows.append(['GP P2 — End (all SKU)'] +
+                    [pvm[bl]['gp_end'] for bl in bls] +
+                    ['GP P2 all'])
+    else:  # pct (growth %)
+        def safe_div(num, den):
+            return num / den * 100 if den else 0
 
-    # Row 2: 1. Churned SKU Effect
-    rows.append(['1. Churned SKU Effect'] +
-                [pvm[bl]['pp_B'] * 100 for bl in bls] +
-                ['GV existing P1'])
+        rows.append(['GP P1 — Start (all SKU)'] +
+                    [pvm[bl]['gp_start'] for bl in bls] +
+                    ['Baseline GP P1'])
+        rows.append(['1. Churned SKU Effect'] +
+                    [safe_div(-pvm[bl]['gp_dep'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['2. Existing SKU Effect'] +
+                    [safe_div(pvm[bl]['cogs_rp'] + pvm[bl]['price_rp'] + pvm[bl]['volmix_rp'],
+                             pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.1 COGS Effect'] +
+                    [safe_div(pvm[bl]['cogs_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.2 Price Effect'] +
+                    [safe_div(pvm[bl]['price_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['  2.3 Vol/Mix Effect'] +
+                    [safe_div(pvm[bl]['volmix_rp'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['3. New SKU Effect'] +
+                    [safe_div(pvm[bl]['gp_new'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['as % of GP P1'])
+        rows.append(['Total GP Growth %'] +
+                    [safe_div(pvm[bl]['gp_end'] - pvm[bl]['gp_start'], pvm[bl]['gp_start']) for bl in bls] +
+                    ['(End - Start) / Start'])
+        rows.append(['GP P2 — End (all SKU)'] +
+                    [pvm[bl]['gp_end'] for bl in bls] +
+                    ['Ending GP P2'])
 
-    # Row 3: 2. Existing SKU Effect (sum of 2.1+2.2+2.3)
-    rows.append(['2. Existing SKU Effect'] +
-                [(pvm[bl]['pp_cogs'] + pvm[bl]['pp_price'] + pvm[bl]['pp_volmix']) * 100 for bl in bls] +
-                ['Sum of 2.1+2.2+2.3'])
-
-    # Row 4: 2.1 COGS Effect
-    rows.append(['  2.1 COGS Effect'] +
-                [pvm[bl]['pp_cogs'] * 100 for bl in bls] +
-                ['GV_hyp1 = q1×p1'])
-
-    # Row 5: 2.2 Price Effect
-    rows.append(['  2.2 Price Effect'] +
-                [pvm[bl]['pp_price'] * 100 for bl in bls] +
-                ['GV_hyp2 = q1×p2'])
-
-    # Row 6: 2.3 Vol/Mix Effect
-    rows.append(['  2.3 Vol/Mix Effect'] +
-                [pvm[bl]['pp_volmix'] * 100 for bl in bls] +
-                ['GV actual existing P2'])
-
-    # Row 7: 3. New SKU Effect
-    rows.append(['3. New SKU Effect'] +
-                [pvm[bl]['pp_G'] * 100 for bl in bls] +
-                ['GV P2 all'])
-
-    # Row 8: Total Margin Change
-    rows.append(['Total Margin Change'] +
-                [pvm[bl]['pp_total'] * 100 for bl in bls] +
-                ['End - Start'])
-
-    # Row 9: Margin P2 — End (all SKU)
-    rows.append(['Margin P2 — End (all SKU)'] +
-                [pvm[bl]['m_end'] * 100 for bl in bls] +
-                ['GV P2 all'])
-
-    cols = ['Step', 'Dry', 'Fresh', 'Frozen', 'PL', 'Overall', 'GV Reference']
+    cols = ['Step', 'Dry', 'Fresh', 'Frozen', 'PL', 'Overall', 'Reference']
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -421,6 +466,173 @@ def compute_l1_breakdown(df):
     g = g.sort_values('gp_diff', ascending=False).reset_index(drop=True)
     return g
 
+
+def compute_l1_pvm(df, scope='TOTAL'):
+    """
+    Compute PVM decomposition per L1 category, optionally filtered by BL scope.
+    Returns dict of L1 -> {effect components}.
+    Components per L1:
+      gp_dep, cogs_rp, price_rp, volmix_rp, gp_new, gp_start, gp_end
+      m_base, m_end, pp_B, pp_cogs, pp_price, pp_volmix, pp_G, pp_total
+    """
+    if scope != 'TOTAL':
+        df_scope = df[df['pricing_bl'] == scope].copy()
+    else:
+        df_scope = df.copy()
+
+    if 'l1_category' not in df_scope.columns:
+        return {}
+
+    l1_data = {}
+    for l1, g in df_scope.groupby('l1_category', dropna=False):
+        if pd.isna(l1):
+            continue
+
+        # Split by status
+        if 'sku_status' in g.columns:
+            ex = g[g['sku_status'] == 'Existing']
+            new = g[g['sku_status'] == 'New']
+            dep = g[g['sku_status'] == 'Deprecated']
+        else:
+            ex = g; new = g.iloc[0:0]; dep = g.iloc[0:0]
+
+        # Aggregates
+        gv_ex1 = ex['gv_p1'].sum()
+        gv_ex2 = ex['gv_p2'].sum()
+        gp_ex1 = ex['gp_p1'].sum()
+        gp_ex2 = ex['gp_p2'].sum()
+        gv_dep = dep['gv_p1'].sum()
+        gp_dep_val = dep['gp_p1'].sum()
+        gv_new_val = new['gv_p2'].sum()
+        gp_new_val = new['gp_p2'].sum()
+
+        gp_start = gp_ex1 + gp_dep_val
+        gp_end = gp_ex2 + gp_new_val
+        gv_start = gv_ex1 + gv_dep
+        gv_end = gv_ex2 + gv_new_val
+
+        # Existing-only PVM
+        q1 = ex['qty_p1'].fillna(0)
+        q2 = ex['qty_p2'].fillna(0)
+        p1 = ex['price_p1'].fillna(0)
+        p2 = ex['price_p2'].fillna(0)
+        c1 = ex['cogs_p1'].fillna(0)
+        c2 = ex['cogs_p2'].fillna(0)
+
+        cogs_rp = (q1 * (c1 - c2)).sum()
+        price_rp = (q1 * (p2 - p1)).sum()
+        volmix_rp = ((q2 - q1) * (p2 - c2)).sum()
+
+        # Margin pp decomposition (vs gv_ex_p1 for COGS/Price, vs gv_ex_p2 for Vol/Mix)
+        m_base = gp_start / gv_start if gv_start else 0
+        m_end = gp_end / gv_end if gv_end else 0
+        m_ex1 = gp_ex1 / gv_ex1 if gv_ex1 else 0
+        m_ex2 = gp_ex2 / gv_ex2 if gv_ex2 else 0
+        gp_h1 = gv_ex1 - (q1 * c2).sum() if gv_ex1 else 0
+        gp_h2 = (q1 * p2).sum() - (q1 * c2).sum() if gv_ex1 else 0
+        gv_h2 = (q1 * p2).sum()
+        m_h1 = gp_h1 / gv_ex1 if gv_ex1 else 0
+        m_h2 = gp_h2 / gv_h2 if gv_h2 else 0
+
+        pp_B = m_ex1 - m_base
+        pp_cogs = m_h1 - m_ex1
+        pp_price = m_h2 - m_h1
+        pp_volmix = m_ex2 - m_h2
+        pp_G = m_end - m_ex2
+
+        l1_data[l1] = {
+            'pricing_bl': g['pricing_bl'].iloc[0] if 'pricing_bl' in g.columns else None,
+            'gv_start': gv_start, 'gv_end': gv_end,
+            'gp_start': gp_start, 'gp_end': gp_end,
+            'gp_dep': gp_dep_val, 'gp_new': gp_new_val,
+            'cogs_rp': cogs_rp, 'price_rp': price_rp, 'volmix_rp': volmix_rp,
+            'm_base': m_base, 'm_end': m_end,
+            'pp_B': pp_B, 'pp_cogs': pp_cogs, 'pp_price': pp_price,
+            'pp_volmix': pp_volmix, 'pp_G': pp_G,
+            'pp_total': pp_B + pp_cogs + pp_price + pp_volmix + pp_G,
+        }
+    return l1_data
+
+
+def build_l1_decomp_df(df, scope='TOTAL', mode='rp'):
+    """
+    Tabel L1 baru — L1 effect breakdown per scope.
+    Cols: L1 Category, BL, 1.Churned, 2.Existing, 2.1 COGS, 2.2 Price, 2.3 Vol/Mix, 3.New, Total
+    mode: 'rp', 'pct' (growth %), 'pp' (margin pp), 'pp_contrib' (weighted contribution to scope's total)
+    """
+    l1_data = compute_l1_pvm(df, scope=scope)
+    if not l1_data:
+        return pd.DataFrame()
+
+    # For pp_contrib mode, need scope-level GV total for weighting
+    if mode == 'pp_contrib':
+        total_gv = sum(d['gv_end'] for d in l1_data.values())
+    else:
+        total_gv = None
+
+    rows = []
+    for l1, d in l1_data.items():
+        bl = d['pricing_bl']
+        if mode == 'rp':
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                '1. Churned': -d['gp_dep'],
+                '2. Existing': d['cogs_rp'] + d['price_rp'] + d['volmix_rp'],
+                '  2.1 COGS': d['cogs_rp'],
+                '  2.2 Price': d['price_rp'],
+                '  2.3 Vol/Mix': d['volmix_rp'],
+                '3. New': d['gp_new'],
+                'Total Δ': d['gp_end'] - d['gp_start'],
+            }
+        elif mode == 'pct':
+            gp1 = d['gp_start'] if d['gp_start'] else 1
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                '1. Churned': (-d['gp_dep']) / gp1 * 100,
+                '2. Existing': (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp1 * 100,
+                '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
+                '  2.2 Price': d['price_rp'] / gp1 * 100,
+                '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
+                '3. New': d['gp_new'] / gp1 * 100,
+                'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
+            }
+        elif mode == 'pp':
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                '1. Churned': d['pp_B'] * 100,
+                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
+                '  2.1 COGS': d['pp_cogs'] * 100,
+                '  2.2 Price': d['pp_price'] * 100,
+                '  2.3 Vol/Mix': d['pp_volmix'] * 100,
+                '3. New': d['pp_G'] * 100,
+                'Total Δ': d['pp_total'] * 100,
+            }
+        else:  # pp_contrib — Rp effect / scope_GV_end (sum-up to scope margin change in pp)
+            # This ensures sum across L1 = scope-level total margin change in pp
+            if total_gv:
+                row = {
+                    'L1 Category': l1, 'BL': bl,
+                    '1. Churned': (-d['gp_dep']) / total_gv * 100,
+                    '2. Existing': (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / total_gv * 100,
+                    '  2.1 COGS': d['cogs_rp'] / total_gv * 100,
+                    '  2.2 Price': d['price_rp'] / total_gv * 100,
+                    '  2.3 Vol/Mix': d['volmix_rp'] / total_gv * 100,
+                    '3. New': d['gp_new'] / total_gv * 100,
+                    'Total Δ': (d['gp_end'] - d['gp_start']) / total_gv * 100,
+                }
+            else:
+                row = {'L1 Category': l1, 'BL': bl,
+                       '1. Churned': 0, '2. Existing': 0, '  2.1 COGS': 0,
+                       '  2.2 Price': 0, '  2.3 Vol/Mix': 0, '3. New': 0, 'Total Δ': 0}
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values('Total Δ', ascending=False).reset_index(drop=True)
+    return out
+
+
+
 def _enrich_existing_with_effects(df):
     """
     Filter to Existing SKU only and add per-SKU decomposition + Δ Rp columns.
@@ -454,6 +666,16 @@ def _enrich_existing_with_effects(df):
     # Per-SKU margin P1, P2 (unit margin)
     existing['margin_p1_pct'] = np.where(p1 > 0, (p1 - c1) / p1 * 100, np.nan)
     existing['margin_p2_pct'] = np.where(p2 > 0, (p2 - c2) / p2 * 100, np.nan)
+
+    # Avg stock P1, P2 + growth %
+    if 'avg_stock_p1' in existing.columns and 'avg_stock_p2' in existing.columns:
+        s1 = existing['avg_stock_p1']
+        s2 = existing['avg_stock_p2']
+        existing['avg_stock_growth_pct'] = np.where(s1 > 0, (s2 - s1) / s1 * 100, np.nan)
+    else:
+        existing['avg_stock_p1'] = np.nan
+        existing['avg_stock_p2'] = np.nan
+        existing['avg_stock_growth_pct'] = np.nan
 
     # Growth % = sku_gp_diff / sku_gp_p1 (per-SKU growth)
     gp1 = existing['gp_p1'].replace(0, np.nan)
@@ -917,104 +1139,197 @@ if st.session_state.analysis is not None:
     fig_tornado = make_tornado_chart(pvm, scope=scope, mode=mode_key)
     st.plotly_chart(fig_tornado, use_container_width=True)
 
-    # ── TABEL 1: Margin pp Bridge per BL (Style Sheet 2) ─────────────────
-    st.markdown("##### 📊 Tabel 1: Margin pp Bridge per BL")
-    st.caption("Margin pp **dalam** masing-masing BL (un-weighted). Bisa lihat before-after margin per BL.")
+    # ── TABEL 1: Margin Bridge per BL (unit-aware) ────────────────────────
+    unit_label_t1 = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'Growth %'}[mode_key]
+    st.markdown(f"##### 📊 Tabel 1: Margin Bridge per BL ({unit_label_t1})")
+    st.caption("Margin/GP **dalam** masing-masing BL (un-weighted). Ikutin unit toggle di atas. "
+               "Bisa lihat before-after per BL.")
 
-    bridge_df = build_margin_pp_bridge_df(pvm)
-    # Format pp columns
+    bridge_df = build_margin_pp_bridge_df(pvm, mode=mode_key)
     bl_cols = ['Dry', 'Fresh', 'Frozen', 'PL', 'Overall']
 
-    def style_bridge_table(row):
-        """Color rows: gray for start/end/total, light bg for sub-rows."""
-        styles = []
-        label = row['Step']
-        if 'Margin P1' in label or 'Margin P2' in label:
-            base = 'background-color: #E5E7EB; font-weight: 700;'
-        elif 'Total Margin' in label:
-            base = 'background-color: #DBEAFE; font-weight: 700;'
-        elif '1. Churned' in label:
-            base = 'background-color: #FEE2E2;'
-        elif '2. Existing' in label:
-            base = 'background-color: #FEF3C7; font-weight: 600;'
-        elif '2.1 COGS' in label:
-            base = 'background-color: #FFF7ED;'
-        elif '2.2 Price' in label:
-            base = 'background-color: #EFF6FF;'
-        elif '2.3 Vol/Mix' in label:
-            base = 'background-color: #F3E8FF;'
-        elif '3. New' in label:
-            base = 'background-color: #DCFCE7;'
-        else:
-            base = ''
-        return [base] * len(row)
+    # Identify row types for special handling
+    def _is_baseline_row(label):
+        """Margin/GP P1 Start or P2 End row — show as absolute number, not delta."""
+        return 'Start' in label or 'End' in label
 
-    def fmt_pp_cell(v):
-        """Format pp number with sign, except for Margin Start/End which are absolute %."""
-        if isinstance(v, str):
-            return v
-        try:
-            return f"{v:+.3f}pp"
-        except (TypeError, ValueError):
-            return v
+    def _is_total_row(label):
+        return 'Total' in label and 'Effect' not in label
 
-    # Build display df with conditional formatting per row type
-    def format_bridge_df(df_):
+    # Format cells per row type
+    def format_bridge_df_unit(df_, mode_):
         out_rows = []
         for _, row in df_.iterrows():
             label = row['Step']
-            is_abs_margin = 'Margin P1' in label or 'Margin P2' in label
+            is_baseline = _is_baseline_row(label)
             new_row = {'Step': label}
             for col in bl_cols:
                 v = row[col]
-                if is_abs_margin:
-                    new_row[col] = f"{v:.2f}%"
-                else:
-                    new_row[col] = f"{v:+.3f}pp"
-            new_row['GV Reference'] = row['GV Reference']
+                if pd.isna(v):
+                    new_row[col] = '—'
+                elif mode_ == 'pp':
+                    if is_baseline:
+                        new_row[col] = f"{v:.2f}%"
+                    else:
+                        new_row[col] = f"{v:+.3f}pp"
+                elif mode_ == 'rp':
+                    # All values are Rp (baselines + effects)
+                    new_row[col] = fmt_rp(v)
+                else:  # pct
+                    if is_baseline:
+                        # Show GP P1/P2 as Rp (absolute baseline)
+                        new_row[col] = fmt_rp(v)
+                    else:
+                        new_row[col] = f"{v:+.2f}%"
+            new_row['Reference'] = row['Reference']
             out_rows.append(new_row)
         return pd.DataFrame(out_rows)
 
-    bridge_display = format_bridge_df(bridge_df)
+    bridge_display = format_bridge_df_unit(bridge_df, mode_key)
+
+    # Color scheme: gradient red-white-green by magnitude on effect cells only.
+    # Baseline rows (Margin P1/P2 Start/End) → grey subtle bg.
+    def style_bridge_gradient(df_orig, df_disp):
+        """Apply gradient based on numeric values in df_orig (numeric), to df_disp (str cells)."""
+        # Compute color matrix from numeric values
+        # vmax = max absolute across all effect (non-baseline) cells
+        effect_mask = df_orig['Step'].apply(lambda s: not _is_baseline_row(s))
+        effect_vals = df_orig.loc[effect_mask, bl_cols].values.flatten()
+        effect_vals = [v for v in effect_vals if pd.notna(v)]
+        vmax = max(abs(v) for v in effect_vals) if effect_vals else 1
+        if vmax == 0: vmax = 1
+
+        def color_cell(val_numeric, is_baseline):
+            if is_baseline:
+                return 'background-color: #F3F4F6; font-weight: 700;'
+            if pd.isna(val_numeric):
+                return ''
+            # Normalize to [-1, 1]
+            norm = max(-1, min(1, val_numeric / vmax))
+            if norm > 0:
+                # Green gradient: white → light green → strong green
+                alpha = norm  # 0..1
+                r = int(255 - (255-22) * alpha)   # 255 → 22 (green700 #16A34A)
+                g = int(255 - (255-163) * alpha)  # 255 → 163
+                b = int(255 - (255-74) * alpha)   # 255 → 74
+                return f'background-color: rgb({r},{g},{b}); color: #111827;'
+            elif norm < 0:
+                alpha = -norm
+                r = int(255 - (255-220) * alpha)  # 255 → 220 (red600 #DC2626)
+                g = int(255 - (255-38) * alpha)
+                b = int(255 - (255-38) * alpha)
+                # Strong red → white text
+                text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                return f'background-color: rgb({r},{g},{b}); color: {text_color};'
+            else:
+                return ''
+
+        def apply_style(row):
+            label = row['Step']
+            is_baseline = _is_baseline_row(label)
+            is_total = _is_total_row(label)
+            styles = []
+            for col in df_disp.columns:
+                if col == 'Step':
+                    if is_total:
+                        styles.append('font-weight: 700; background-color: #DBEAFE;')
+                    elif is_baseline:
+                        styles.append('font-weight: 700; background-color: #F3F4F6;')
+                    elif label.startswith('2. Existing'):
+                        styles.append('font-weight: 600;')
+                    elif label.startswith('  '):
+                        styles.append('padding-left: 20px;')
+                    else:
+                        styles.append('')
+                elif col == 'Reference':
+                    styles.append('color: #6B7280; font-style: italic;')
+                else:
+                    # Numeric column - look up original numeric value
+                    orig_idx = row.name
+                    val_num = df_orig.loc[orig_idx, col] if col in df_orig.columns else np.nan
+                    if is_total:
+                        base_style = color_cell(val_num, False) + ' font-weight: 700;'
+                    elif is_baseline:
+                        base_style = 'background-color: #F3F4F6; font-weight: 700;'
+                    else:
+                        base_style = color_cell(val_num, False)
+                    styles.append(base_style)
+            return styles
+
+        return df_disp.style.apply(apply_style, axis=1)
+
     st.dataframe(
-        bridge_display.style.apply(style_bridge_table, axis=1),
+        style_bridge_gradient(bridge_df, bridge_display),
         use_container_width=True, hide_index=True
     )
 
-    # ── TABEL 2: BL Contribution to Overall (GV-weighted) ────────────────
+    # ── TABEL 2: BL Contribution to Overall (fix pp, gradient) ───────────
     st.markdown("##### 📊 Tabel 2: BL Contribution to Overall Margin Change")
-    st.caption("Margin pp **BL-weighted** (× GV share P2). **Sum of all BL contributions = Overall pp.** "
-               "Reading: 'BL X kontribusi ke overall margin change sebesar Y pp'.")
+    st.caption("Margin pp **BL-weighted** (× GV share P2). Reading: 'BL X kontribusi ke overall margin change sebesar Y pp'. "
+               "*Note: sum BL contributions ≈ Overall pp (small discrepancy karena interaksi weight P1 vs P2, ~0.02pp).* "
+               "Fix pp, tidak ikut unit toggle.")
 
     contrib_df = build_bl_contribution_df(pvm)
     contrib_bl_cols = ['Dry contrib', 'Fresh contrib', 'Frozen contrib', 'PL contrib', 'Overall']
 
-    def style_contrib_table(row):
-        label = row['Step']
-        if 'Total Margin' in label:
-            base = 'background-color: #DBEAFE; font-weight: 700;'
-        elif '1. Churned' in label:
-            base = 'background-color: #FEE2E2;'
-        elif '2. Existing' in label:
-            base = 'background-color: #FEF3C7; font-weight: 600;'
-        elif '2.1 COGS' in label:
-            base = 'background-color: #FFF7ED;'
-        elif '2.2 Price' in label:
-            base = 'background-color: #EFF6FF;'
-        elif '2.3 Vol/Mix' in label:
-            base = 'background-color: #F3E8FF;'
-        elif '3. New' in label:
-            base = 'background-color: #DCFCE7;'
-        else:
-            base = ''
-        return [base] * len(row)
-
+    # Format cells as pp
     contrib_display = contrib_df.copy()
     for col in contrib_bl_cols:
-        contrib_display[col] = contrib_display[col].apply(lambda v: f"{v:+.3f}pp")
+        contrib_display[col] = contrib_display[col].apply(lambda v: f"{v:+.3f}pp" if pd.notna(v) else '—')
+
+    def style_contrib_gradient(df_orig, df_disp):
+        # Compute color range from non-total rows
+        non_total = df_orig['Step'].apply(lambda s: 'Total' not in s)
+        vals = df_orig.loc[non_total, contrib_bl_cols].values.flatten()
+        vals = [v for v in vals if pd.notna(v)]
+        vmax = max(abs(v) for v in vals) if vals else 1
+        if vmax == 0: vmax = 1
+
+        def color_cell(val_numeric):
+            if pd.isna(val_numeric): return ''
+            norm = max(-1, min(1, val_numeric / vmax))
+            if norm > 0:
+                alpha = norm
+                r = int(255 - (255-22) * alpha)
+                g = int(255 - (255-163) * alpha)
+                b = int(255 - (255-74) * alpha)
+                return f'background-color: rgb({r},{g},{b}); color: #111827;'
+            elif norm < 0:
+                alpha = -norm
+                r = int(255 - (255-220) * alpha)
+                g = int(255 - (255-38) * alpha)
+                b = int(255 - (255-38) * alpha)
+                text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                return f'background-color: rgb({r},{g},{b}); color: {text_color};'
+            return ''
+
+        def apply_style(row):
+            label = row['Step']
+            is_total = 'Total' in label
+            styles = []
+            for col in df_disp.columns:
+                if col == 'Step':
+                    if is_total:
+                        styles.append('font-weight: 700; background-color: #DBEAFE;')
+                    elif label.startswith('2. Existing'):
+                        styles.append('font-weight: 600;')
+                    elif label.startswith('  '):
+                        styles.append('padding-left: 20px;')
+                    else:
+                        styles.append('')
+                else:
+                    orig_idx = row.name
+                    val_num = df_orig.loc[orig_idx, col] if col in df_orig.columns else np.nan
+                    base = color_cell(val_num)
+                    if is_total:
+                        base += ' font-weight: 700;'
+                    styles.append(base)
+            return styles
+
+        return df_disp.style.apply(apply_style, axis=1)
 
     st.dataframe(
-        contrib_display.style.apply(style_contrib_table, axis=1),
+        style_contrib_gradient(contrib_df, contrib_display),
         use_container_width=True, hide_index=True
     )
 
@@ -1109,6 +1424,110 @@ if st.session_state.analysis is not None:
             use_container_width=True, hide_index=True, height=420
         )
 
+        # ── TABEL L1 BARU: PVM Decomposition per L1 (filter Unit + Scope) ─
+        st.markdown("##### 📊 Tabel L1 PVM Decomposition")
+        st.caption("PVM effect breakdown per L1 category. Filter unit dan scope di bawah.")
+
+        l1c1, l1c2 = st.columns([1, 1])
+        with l1c1:
+            l1_unit = st.radio(
+                "Unit:",
+                ['Rupiah (Rp)', 'Growth %', 'Margin pp', 'Margin pp terhadap Scope'],
+                horizontal=True,
+                key='l1_unit',
+            )
+            l1_mode_map = {
+                'Rupiah (Rp)': 'rp',
+                'Growth %': 'pct',
+                'Margin pp': 'pp',
+                'Margin pp terhadap Scope': 'pp_contrib',
+            }
+            l1_mode = l1_mode_map[l1_unit]
+        with l1c2:
+            l1_scope = st.radio(
+                "Scope:",
+                ['TOTAL', 'Dry', 'Fresh', 'Frozen', 'PL'],
+                horizontal=True,
+                key='l1_scope',
+            )
+
+        l1_decomp = build_l1_decomp_df(df, scope=l1_scope, mode=l1_mode)
+        if l1_decomp.empty:
+            st.info("Tidak ada data L1 untuk scope ini.")
+        else:
+            # Format cells
+            effect_cols = ['1. Churned', '2. Existing', '  2.1 COGS', '  2.2 Price', '  2.3 Vol/Mix', '3. New', 'Total Δ']
+
+            def fmt_cell(v, mode_):
+                if pd.isna(v): return '—'
+                if mode_ == 'rp':
+                    return fmt_rp(v)
+                elif mode_ == 'pct':
+                    return f"{v:+.2f}%"
+                else:  # pp or pp_contrib
+                    return f"{v:+.3f}pp"
+
+            display = l1_decomp.copy()
+            for col in effect_cols:
+                display[col] = display[col].apply(lambda v: fmt_cell(v, l1_mode))
+
+            # Gradient coloring on numeric values
+            def style_l1_gradient(df_orig, df_disp):
+                vals = df_orig[effect_cols].values.flatten()
+                vals = [v for v in vals if pd.notna(v)]
+                vmax = max(abs(v) for v in vals) if vals else 1
+                if vmax == 0: vmax = 1
+
+                def color_cell(val_numeric):
+                    if pd.isna(val_numeric): return ''
+                    norm = max(-1, min(1, val_numeric / vmax))
+                    if norm > 0:
+                        alpha = norm
+                        r = int(255 - (255-22) * alpha)
+                        g = int(255 - (255-163) * alpha)
+                        b = int(255 - (255-74) * alpha)
+                        return f'background-color: rgb({r},{g},{b}); color: #111827;'
+                    elif norm < 0:
+                        alpha = -norm
+                        r = int(255 - (255-220) * alpha)
+                        g = int(255 - (255-38) * alpha)
+                        b = int(255 - (255-38) * alpha)
+                        text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
+                        return f'background-color: rgb({r},{g},{b}); color: {text_color};'
+                    return ''
+
+                def apply_style(row):
+                    styles = []
+                    for col in df_disp.columns:
+                        if col in effect_cols:
+                            val_num = df_orig.loc[row.name, col]
+                            styles.append(color_cell(val_num))
+                        else:
+                            styles.append('')
+                    return styles
+
+                return df_disp.style.apply(apply_style, axis=1)
+
+            unit_label_l1 = {
+                'rp': 'Rupiah',
+                'pct': 'GP Growth %',
+                'pp': 'Margin pp',
+                'pp_contrib': f'Margin pp Contribution to {l1_scope}'
+            }[l1_mode]
+            st.markdown(f"**Unit: {unit_label_l1} · Scope: {l1_scope}** · {len(display)} L1 categories")
+
+            st.dataframe(
+                style_l1_gradient(l1_decomp, display),
+                use_container_width=True, hide_index=True, height=600
+            )
+
+            if l1_mode == 'pp_contrib':
+                total_contrib = l1_decomp['Total Δ'].sum()
+                actual_scope_pp = pvm[l1_scope]['pp_total'] * 100
+                st.caption(f"💡 Sum L1 contributions = **{total_contrib:+.3f}pp** ≈ scope {l1_scope} margin change "
+                          f"**{actual_scope_pp:+.3f}pp** (small discrepancy karena interaksi weight P1 vs P2). "
+                          f"Formula: `L1_effect_Rp / total_scope_GV_P2`.")
+
     # ─────────────────────────────────────────────────────────────────────
     # ZONE 4.5 — TOP MOVERS (3 SECTIONS: GP / PRICE / COGS)
     # ─────────────────────────────────────────────────────────────────────
@@ -1150,6 +1569,16 @@ if st.session_state.analysis is not None:
             qty_pct = r.get('qty_diff_pct', np.nan)
             comp_s = r.get('comp_status', '—') or '—'
 
+            # Avg Stock + OOS detection
+            stock_p1 = r.get('avg_stock_p1', np.nan)
+            stock_p2 = r.get('avg_stock_p2', np.nan)
+            stock_growth = r.get('avg_stock_growth_pct', np.nan)
+            # OOS flag: stock_growth <= -10% → driver auto-fill
+            if pd.notna(stock_growth) and stock_growth <= -10:
+                driver_txt = "⚠️ OOS risk"
+            else:
+                driver_txt = ''
+
             pi_p1 = r.get('pi_p1', np.nan)
             pi_p2 = r.get('pi_p2', np.nan)
             pi_txt = f"{pi_p1:.0f}→{pi_p2:.0f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—"
@@ -1170,9 +1599,12 @@ if st.session_state.analysis is not None:
                 'COGS Δ Rp': cogs_diff_rp,
                 'COGS Δ%': cogs_diff_pct,
                 'Qty Δ%': qty_pct,
+                'Stock P1': stock_p1,
+                'Stock P2': stock_p2,
+                'Stock Growth %': stock_growth,
                 'Comp': comp_s,
                 'PI': pi_txt,
-                'Driver': '',
+                'Driver': driver_txt,
             })
         return pd.DataFrame(rows)
 
@@ -1187,6 +1619,9 @@ if st.session_state.analysis is not None:
         'COGS Δ Rp': '{:+,.0f}',
         'COGS Δ%': '{:+.2%}',
         'Qty Δ%': '{:+.1%}',
+        'Stock P1': '{:,.0f}',
+        'Stock P2': '{:,.0f}',
+        'Stock Growth %': '{:+.1f}%',
     }
 
     # ── SECTION A: TOP GP MOVERS ────────────────────────────────────────
