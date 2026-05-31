@@ -194,84 +194,175 @@ def detect_anomalies(pvm):
             })
     return anomalies
 
-def make_waterfall_chart(pvm, scope='TOTAL', mode='rp'):
+def get_bridge_steps(pvm, scope, mode):
     """
-    Build waterfall chart.
-    scope: 'TOTAL', 'Dry', 'Fresh', 'Frozen', 'PL'
-    mode: 'rp' (Rupiah) or 'pp' (margin points)
+    Get bridge step values per scope (TOTAL/Dry/Fresh/Frozen/PL).
+    mode: 'rp' (Rupiah), 'pp' (margin points × 100), 'pct' (growth % of GP_p1)
+    Returns dict: {label: value, ...} for 5 effect steps.
     """
     d = pvm[scope]
     if mode == 'rp':
-        gp_start = d['gp_start']
-        churned = -d['gp_dep']
-        cogs = d['cogs_rp']
-        price = d['price_rp']
-        volmix = d['volmix_rp']
-        new = d['gp_new']
-        gp_end = d['gp_end']
-        existing = cogs + price + volmix
-        unit = "Rp"
-        fmt_func = lambda v: fmt_rp(v)
-    else:  # pp
-        gp_start = d['m_base'] * 100
-        churned = d['pp_B'] * 100
-        cogs = d['pp_cogs'] * 100
-        price = d['pp_price'] * 100
-        volmix = d['pp_volmix'] * 100
-        new = d['pp_G'] * 100
-        gp_end = d['m_end'] * 100
-        existing = cogs + price + volmix
-        unit = "pp"
-        fmt_func = lambda v: f"{v:+.3f}pp" if v != gp_start and v != gp_end else f"{v:.2f}%"
+        return {
+            '1. Churned SKU Effect': -d['gp_dep'],
+            '2.1 COGS Effect': d['cogs_rp'],
+            '2.2 Price Effect': d['price_rp'],
+            '2.3 Vol/Mix Effect': d['volmix_rp'],
+            '3. New SKU Effect': d['gp_new'],
+        }
+    elif mode == 'pp':
+        return {
+            '1. Churned SKU Effect': d['pp_B'] * 100,
+            '2.1 COGS Effect': d['pp_cogs'] * 100,
+            '2.2 Price Effect': d['pp_price'] * 100,
+            '2.3 Vol/Mix Effect': d['pp_volmix'] * 100,
+            '3. New SKU Effect': d['pp_G'] * 100,
+        }
+    else:  # pct (growth %)
+        gp_p1 = d['gp_start'] if d['gp_start'] else 1
+        return {
+            '1. Churned SKU Effect': (-d['gp_dep']) / gp_p1 * 100,
+            '2.1 COGS Effect': d['cogs_rp'] / gp_p1 * 100,
+            '2.2 Price Effect': d['price_rp'] / gp_p1 * 100,
+            '2.3 Vol/Mix Effect': d['volmix_rp'] / gp_p1 * 100,
+            '3. New SKU Effect': d['gp_new'] / gp_p1 * 100,
+        }
 
-    # Build waterfall with sub-bars for Existing breakdown
-    labels = [
-        f"GP P1" if mode=='rp' else 'Margin P1',
-        '1. Churned SKU Effect',
-        '  2.1 COGS Effect',
-        '  2.2 Price Effect',
-        '  2.3 Vol/Mix Effect',
-        '3. New SKU Effect',
-        f"GP P2" if mode=='rp' else 'Margin P2',
-    ]
-    measure = ['absolute', 'relative', 'relative', 'relative', 'relative', 'relative', 'total']
-    values = [gp_start, churned, cogs, price, volmix, new, gp_end]
 
+def fmt_bridge_value(v, mode):
+    """Format value with appropriate unit."""
     if mode == 'rp':
-        text_vals = [fmt_rp(gp_start), fmt_rp(churned), fmt_rp(cogs),
-                     fmt_rp(price), fmt_rp(volmix), fmt_rp(new), fmt_rp(gp_end)]
-    else:
-        text_vals = [f"{gp_start:.2f}%", f"{churned:+.3f}pp", f"{cogs:+.3f}pp",
-                     f"{price:+.3f}pp", f"{volmix:+.3f}pp", f"{new:+.3f}pp",
-                     f"{gp_end:.2f}%"]
+        return fmt_rp(v)
+    elif mode == 'pp':
+        return f"{v:+.3f}pp"
+    else:  # pct
+        return f"{v:+.2f}%"
 
-    fig = go.Figure(go.Waterfall(
-        name="Bridge",
-        orientation="v",
-        measure=measure,
-        x=labels,
-        y=values,
+
+def make_tornado_chart(pvm, scope='TOTAL', mode='rp'):
+    """
+    Horizontal tornado/diverging bar chart, sorted by impact magnitude.
+    Centered at 0, positive (green) right, negative (red) left.
+    """
+    steps = get_bridge_steps(pvm, scope, mode)
+    # Sort by absolute magnitude descending
+    sorted_steps = sorted(steps.items(), key=lambda x: abs(x[1]), reverse=True)
+    labels = [s[0] for s in sorted_steps]
+    values = [s[1] for s in sorted_steps]
+    colors = ['#059669' if v >= 0 else '#DC2626' for v in values]
+    text_vals = [fmt_bridge_value(v, mode) for v in values]
+
+    # Reverse so largest is on top
+    labels = labels[::-1]
+    values = values[::-1]
+    colors = colors[::-1]
+    text_vals = text_vals[::-1]
+
+    unit_label = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'GP Growth %'}[mode]
+
+    fig = go.Figure(go.Bar(
+        x=values,
+        y=labels,
+        orientation='h',
+        marker_color=colors,
         text=text_vals,
-        textposition="outside",
-        connector={"line": {"color": "#9CA3AF", "dash": "dot"}},
-        decreasing={"marker": {"color": "#DC2626"}},
-        increasing={"marker": {"color": "#059669"}},
-        totals={"marker": {"color": "#1F2937"}},
+        textposition='outside',
+        cliponaxis=False,
     ))
 
-    # Add a subtle existing SKU effect annotation bracket
-    existing_str = fmt_rp(existing) if mode == 'rp' else f"{existing:+.3f}pp"
+    # Total summary for title
+    d = pvm[scope]
+    if mode == 'rp':
+        total_str = fmt_rp(d['gp_end'] - d['gp_start'])
+        existing = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
+        existing_str = fmt_rp(existing)
+    elif mode == 'pp':
+        total_str = f"{d['pp_total']*100:+.3f}pp"
+        existing = (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100
+        existing_str = f"{existing:+.3f}pp"
+    else:
+        gp_p1 = d['gp_start'] if d['gp_start'] else 1
+        total_str = f"{(d['gp_end']-d['gp_start'])/gp_p1*100:+.2f}%"
+        existing = (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp_p1 * 100
+        existing_str = f"{existing:+.2f}%"
+
     fig.update_layout(
-        title=f"Margin Bridge — {scope} ({unit})  |  2. Existing SKU Effect = {existing_str}",
+        title=f"Tornado — {scope} ({unit_label})  |  Total: {total_str}  |  2. Existing SKU Effect: {existing_str}",
         showlegend=False,
-        height=480,
-        margin=dict(l=20, r=20, t=60, b=80),
-        yaxis_title=unit,
+        height=420,
+        margin=dict(l=20, r=80, t=60, b=40),
+        xaxis_title=unit_label,
         plot_bgcolor='white',
-        xaxis=dict(tickangle=-15),
+        bargap=0.35,
     )
-    fig.update_yaxes(showgrid=True, gridcolor='#F3F4F6')
+    fig.update_xaxes(showgrid=True, gridcolor='#F3F4F6', zeroline=True, zerolinecolor='#9CA3AF', zerolinewidth=2)
+    fig.update_yaxes(showgrid=False)
     return fig
+
+
+def make_heatmap_matrix(pvm, mode='rp'):
+    """
+    Heatmap matrix: rows = BL, cols = drivers. Color = magnitude with diverging palette.
+    Cells show formatted numeric value.
+    """
+    bls = ['Dry', 'Fresh', 'Frozen', 'PL', 'TOTAL']
+    drivers = ['1. Churned', '2.1 COGS', '2.2 Price', '2.3 Vol/Mix', '3. New SKU', 'Total Δ']
+
+    matrix = []
+    text_matrix = []
+    for bl in bls:
+        d = pvm[bl]
+        if mode == 'rp':
+            row = [-d['gp_dep'], d['cogs_rp'], d['price_rp'], d['volmix_rp'], d['gp_new'],
+                   d['gp_end'] - d['gp_start']]
+            row_text = [fmt_rp(v) for v in row]
+        elif mode == 'pp':
+            row = [d['pp_B']*100, d['pp_cogs']*100, d['pp_price']*100, d['pp_volmix']*100,
+                   d['pp_G']*100, d['pp_total']*100]
+            row_text = [f"{v:+.3f}pp" for v in row]
+        else:  # pct
+            gp_p1 = d['gp_start'] if d['gp_start'] else 1
+            row = [(-d['gp_dep'])/gp_p1*100, d['cogs_rp']/gp_p1*100, d['price_rp']/gp_p1*100,
+                   d['volmix_rp']/gp_p1*100, d['gp_new']/gp_p1*100,
+                   (d['gp_end']-d['gp_start'])/gp_p1*100]
+            row_text = [f"{v:+.2f}%" for v in row]
+        matrix.append(row)
+        text_matrix.append(row_text)
+
+    # Determine color scale range (symmetric around 0)
+    flat = [v for row in matrix for v in row]
+    vmax = max(abs(min(flat)), abs(max(flat))) if flat else 1
+
+    fig = go.Figure(go.Heatmap(
+        z=matrix,
+        x=drivers,
+        y=bls,
+        text=text_matrix,
+        texttemplate="%{text}",
+        textfont={"size": 11, "color": "#111827"},
+        colorscale=[
+            [0, '#FCA5A5'],     # red (negative)
+            [0.5, '#FFFFFF'],   # white (zero)
+            [1, '#86EFAC'],     # green (positive)
+        ],
+        zmid=0,
+        zmin=-vmax,
+        zmax=vmax,
+        showscale=False,
+        xgap=2,
+        ygap=2,
+    ))
+
+    unit_label = {'rp': 'Rupiah', 'pp': 'Margin pp', 'pct': 'GP Growth %'}[mode]
+    fig.update_layout(
+        title=f"Heatmap: BL × Driver ({unit_label})",
+        height=320,
+        margin=dict(l=20, r=20, t=50, b=40),
+        plot_bgcolor='white',
+        xaxis=dict(tickangle=-15, side='top'),
+    )
+    fig.update_yaxes(autorange='reversed')  # TOTAL at bottom
+    return fig
+
 
 def compute_l1_breakdown(df):
     """Aggregate GP P1, GP P2, GP Diff per L1 category."""
@@ -292,17 +383,72 @@ def compute_l1_breakdown(df):
     g = g.sort_values('gp_diff', ascending=False).reset_index(drop=True)
     return g
 
-def compute_top_movers(df, n=10):
-    """Top n gainers + losers by gp_diff. Only Existing SKU (not New/Deprecated)."""
+def _enrich_existing_with_effects(df):
+    """
+    Filter to Existing SKU only and add per-SKU decomposition + Δ Rp columns.
+    Returns enriched DataFrame.
+    """
     if 'sku_status' in df.columns:
         existing = df[df['sku_status'] == 'Existing'].copy()
     else:
         existing = df.copy()
     existing = existing.dropna(subset=['gp_diff'])
 
+    # Per-SKU PVM decomposition
+    # COGS Effect_sku = q_p1 × (cogs_p1 - cogs_p2)   ← positive = COGS turun = bantu GP
+    # Price Effect_sku = q_p1 × (price_p2 - price_p1) ← positive = Price naik = bantu GP
+    # Vol/Mix Effect_sku = (q_p2 - q_p1) × (price_p2 - cogs_p2)  ← positive = qty naik
+    q1 = existing['qty_p1'].fillna(0)
+    q2 = existing['qty_p2'].fillna(0)
+    p1 = existing['price_p1'].fillna(0)
+    p2 = existing['price_p2'].fillna(0)
+    c1 = existing['cogs_p1'].fillna(0)
+    c2 = existing['cogs_p2'].fillna(0)
+
+    existing['cogs_effect'] = q1 * (c1 - c2)
+    existing['price_effect'] = q1 * (p2 - p1)
+    existing['volmix_effect'] = (q2 - q1) * (p2 - c2)
+
+    # Δ Rp (nominal per-unit changes)
+    existing['price_diff_rp'] = p2 - p1
+    existing['cogs_diff_rp'] = c2 - c1
+
+    # Growth % = sku_gp_diff / sku_gp_p1 (per-SKU growth)
+    gp1 = existing['gp_p1'].replace(0, np.nan)
+    existing['gp_growth_pct'] = (existing['gp_diff'] / gp1) * 100
+
+    return existing
+
+
+def compute_top_movers_gp(df, n=10):
+    """Top n by GP Δ — gainers (highest gp_diff) and losers (lowest)."""
+    existing = _enrich_existing_with_effects(df)
     gainers = existing.nlargest(n, 'gp_diff')
     losers = existing.nsmallest(n, 'gp_diff')
     return gainers, losers
+
+
+def compute_top_movers_price(df, n=10):
+    """Top n by Price Δ% — up (highest) and down (lowest)."""
+    existing = _enrich_existing_with_effects(df)
+    existing = existing.dropna(subset=['price_diff_pct'])
+    ups = existing.nlargest(n, 'price_diff_pct')
+    downs = existing.nsmallest(n, 'price_diff_pct')
+    return ups, downs
+
+
+def compute_top_movers_cogs(df, n=10):
+    """Top n by COGS Δ% — up (highest) and down (lowest)."""
+    existing = _enrich_existing_with_effects(df)
+    existing = existing.dropna(subset=['cogs_diff_pct'])
+    ups = existing.nlargest(n, 'cogs_diff_pct')
+    downs = existing.nsmallest(n, 'cogs_diff_pct')
+    return ups, downs
+
+
+def compute_top_movers(df, n=10):
+    """Backward compat alias for GP movers."""
+    return compute_top_movers_gp(df, n)
 
 def compute_watch_priority(df):
     """Find Priority SKUs: (Up,Up,Flat) or (Drop,Drop,Flat) on (cogs, comp, price)."""
@@ -547,20 +693,52 @@ if st.session_state.analysis is not None:
     gp_diff_pct = gp_diff / gp_p1 if gp_p1 else 0
     margin_diff = m_p2 - m_p1
 
+    # COGS (Overall): GV - GP
+    cogs_p1 = gv_p1 - gp_p1
+    cogs_p2 = gv_p2 - gp_p2
+    cogs_diff = cogs_p2 - cogs_p1
+    cogs_diff_pct = cogs_diff / cogs_p1 if cogs_p1 else 0
+
     # SKU counts
     if 'sku_status' in df.columns:
         n_existing = (df['sku_status'] == 'Existing').sum()
         n_new = (df['sku_status'] == 'New').sum()
         n_dep = (df['sku_status'] == 'Deprecated').sum()
         n_active_p2 = n_existing + n_new
+        n_active_p1 = n_existing + n_dep
     else:
-        n_existing = n_new = n_dep = n_active_p2 = 0
+        n_existing = n_new = n_dep = n_active_p2 = n_active_p1 = 0
 
-    # Qty (existing only, since New/Dep skew comparison)
-    qty_p1_total = df[df['sku_status'] == 'Existing']['qty_p1'].sum() if 'sku_status' in df.columns else df['qty_p1'].sum()
-    qty_p2_total = df[df['sku_status'] == 'Existing']['qty_p2'].sum() if 'sku_status' in df.columns else df['qty_p2'].sum()
-    qty_diff = qty_p2_total - qty_p1_total
-    qty_diff_pct = qty_diff / qty_p1_total if qty_p1_total else 0
+    # Qty OVERALL (Definisi A): P1 = Existing+Dep, P2 = Existing+New
+    if 'sku_status' in df.columns:
+        qty_p1_overall = df[df['sku_status'].isin(['Existing', 'Deprecated'])]['qty_p1'].sum()
+        qty_p2_overall = df[df['sku_status'].isin(['Existing', 'New'])]['qty_p2'].sum()
+        qty_p1_existing = df[df['sku_status'] == 'Existing']['qty_p1'].sum()
+        qty_p2_existing = df[df['sku_status'] == 'Existing']['qty_p2'].sum()
+        gv_p1_existing = df[df['sku_status'] == 'Existing']['gv_p1'].sum()
+        gv_p2_existing = df[df['sku_status'] == 'Existing']['gv_p2'].sum()
+    else:
+        qty_p1_overall = df['qty_p1'].sum()
+        qty_p2_overall = df['qty_p2'].sum()
+        qty_p1_existing = qty_p1_overall
+        qty_p2_existing = qty_p2_overall
+        gv_p1_existing = gv_p1
+        gv_p2_existing = gv_p2
+
+    qty_diff_overall = qty_p2_overall - qty_p1_overall
+    qty_diff_pct_overall = qty_diff_overall / qty_p1_overall if qty_p1_overall else 0
+
+    # Avg Price/Unit (Existing only, per user request)
+    avg_price_p1 = gv_p1_existing / qty_p1_existing if qty_p1_existing else 0
+    avg_price_p2 = gv_p2_existing / qty_p2_existing if qty_p2_existing else 0
+    avg_price_diff = avg_price_p2 - avg_price_p1
+    avg_price_diff_pct = avg_price_diff / avg_price_p1 if avg_price_p1 else 0
+
+    # GP per SKU (productivity metric)
+    gp_per_sku_p1 = gp_p1 / n_active_p1 if n_active_p1 else 0
+    gp_per_sku_p2 = gp_p2 / n_active_p2 if n_active_p2 else 0
+    gp_per_sku_diff = gp_per_sku_p2 - gp_per_sku_p1
+    gp_per_sku_diff_pct = gp_per_sku_diff / gp_per_sku_p1 if gp_per_sku_p1 else 0
 
     # Row 1: GV / GP / Margin
     c1, c2, c3 = st.columns(3)
@@ -589,37 +767,68 @@ if st.session_state.analysis is not None:
             sub=f"P1: {fmt_pct(m_p1)}"
         ), unsafe_allow_html=True)
 
-    # Row 2: Qty / SKU Active / SKU Churn
+    # Row 2: Qty (Overall) / COGS / Avg Price/Unit (Existing)
     c4, c5, c6 = st.columns(3)
     with c4:
         st.markdown(kpi_card(
-            "Qty Sold (Existing SKU)",
-            f"{qty_p2_total/1e6:.2f} M",
-            delta=qty_diff_pct,
-            delta_label=f"{qty_diff:+,.0f} ({qty_diff_pct*100:+.2f}%)",
-            sub=f"P1: {qty_p1_total/1e6:.2f} M"
+            "Qty Sold (Overall)",
+            f"{qty_p2_overall/1e6:.2f} M",
+            delta=qty_diff_pct_overall,
+            delta_label=f"{qty_diff_overall:+,.0f} ({qty_diff_pct_overall*100:+.2f}%)",
+            sub=f"P1: {qty_p1_overall/1e6:.2f} M (Existing+Dep) · P2: Existing+New"
         ), unsafe_allow_html=True)
     with c5:
         st.markdown(kpi_card(
-            "# SKU Active P2",
-            f"{n_active_p2:,}",
-            sub=f"Existing: {n_existing:,} · Net change vs P1"
+            "COGS",
+            fmt_rp(cogs_p2),
+            delta=cogs_diff_pct,
+            delta_label=f"{fmt_rp(cogs_diff)} ({cogs_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(cogs_p1)}",
+            delta_inverse=True  # lower COGS = good
         ), unsafe_allow_html=True)
     with c6:
+        st.markdown(kpi_card(
+            "Avg Price/Unit",
+            f"Rp {avg_price_p2:,.0f}",
+            delta=avg_price_diff_pct,
+            delta_label=f"{avg_price_diff:+,.0f} ({avg_price_diff_pct*100:+.2f}%)",
+            sub=f"P1: Rp {avg_price_p1:,.0f} · (Existing SKU only)"
+        ), unsafe_allow_html=True)
+
+    # Row 3: # SKU Active / SKU Churn / GP per SKU
+    c7, c8, c9 = st.columns(3)
+    with c7:
+        st.markdown(kpi_card(
+            "# SKU Active P2",
+            f"{n_active_p2:,}",
+            sub=f"Existing: {n_existing:,} · P1 Active: {n_active_p1:,}"
+        ), unsafe_allow_html=True)
+    with c8:
         st.markdown(kpi_card(
             "SKU Churn",
             f"+{n_new:,} / -{n_dep:,}",
             sub=f"Net: {n_new - n_dep:+,} (New − Deprecated)"
         ), unsafe_allow_html=True)
+    with c9:
+        st.markdown(kpi_card(
+            "GP per SKU",
+            fmt_rp(gp_per_sku_p2),
+            delta=gp_per_sku_diff_pct,
+            delta_label=f"{fmt_rp(gp_per_sku_diff)} ({gp_per_sku_diff_pct*100:+.2f}%)",
+            sub=f"P1: {fmt_rp(gp_per_sku_p1)} · Productivity"
+        ), unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────
-    # ZONE 3 — MARGIN BRIDGE WATERFALL
+    # ZONE 3 — MARGIN BRIDGE (Tornado + Heatmap)
     # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">3️⃣ Margin Bridge</div>', unsafe_allow_html=True)
 
     # Narrative
     pp_existing_tot = TOT['pp_cogs'] + TOT['pp_price'] + TOT['pp_volmix']
     pp_total = TOT['pp_total']
+    gp_diff_tot = TOT['gp_end'] - TOT['gp_start']
+    growth_pct_tot = gp_diff_tot / TOT['gp_start'] if TOT['gp_start'] else 0
+
     drivers_sorted = sorted(
         [('2.1 COGS Effect', TOT['pp_cogs']),
          ('2.2 Price Effect', TOT['pp_price']),
@@ -634,38 +843,56 @@ if st.session_state.analysis is not None:
     direction = "naik" if pp_total >= 0 else "turun"
     st.markdown(f"""
         Margin {direction} **{fmt_pp(pp_total, 3)}** dari **{fmt_pct(m_p1)}** ke **{fmt_pct(m_p2)}**.
+        GP absolut: **{fmt_rp(gp_diff_tot)}** ({growth_pct_tot*100:+.2f}% growth vs P1).
         Driver utama: {drivers_txt}.
         Existing SKU Effect = COGS + Price + Vol/Mix = **{fmt_pp(pp_existing_tot, 3)}**.
     """)
 
-    # Scope toggle + mode toggle
+    # Scope toggle + mode toggle (3 units now)
     bx1, bx2 = st.columns([2, 1])
     with bx1:
         scope = st.radio(
             "Scope:",
             ['TOTAL', 'Dry', 'Fresh', 'Frozen', 'PL'],
             horizontal=True,
-            key='waterfall_scope',
+            key='bridge_scope',
         )
     with bx2:
-        mode = st.radio("Unit:", ['Rupiah (Rp)', 'Margin (pp)'], horizontal=True, key='waterfall_mode')
-        mode_key = 'rp' if 'Rupiah' in mode else 'pp'
+        mode = st.radio(
+            "Unit:",
+            ['Rupiah (Rp)', 'Growth %', 'Margin (pp)'],
+            horizontal=True,
+            key='bridge_mode'
+        )
+        if 'Rupiah' in mode:
+            mode_key = 'rp'
+        elif 'Growth' in mode:
+            mode_key = 'pct'
+        else:
+            mode_key = 'pp'
 
-    fig = make_waterfall_chart(pvm, scope=scope, mode=mode_key)
-    st.plotly_chart(fig, use_container_width=True)
+    # Tornado chart
+    fig_tornado = make_tornado_chart(pvm, scope=scope, mode=mode_key)
+    st.plotly_chart(fig_tornado, use_container_width=True)
 
-    # Per-BL contribution table below waterfall
+    # Heatmap matrix (expanded default per user)
+    st.markdown("**Heatmap: BL × Driver** — quick view siapa yang paling buruk di BL mana")
+    fig_heatmap = make_heatmap_matrix(pvm, mode=mode_key)
+    st.plotly_chart(fig_heatmap, use_container_width=True)
+
+    # Per-BL contribution table below
     with st.expander("📋 Breakdown numerical (semua BL)", expanded=False):
         bridge_data = []
         for bl in ['TOTAL'] + BL_ORDER:
             d = pvm[bl]
             existing_rp = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
-            pp_existing = d['pp_cogs'] + d['pp_price'] + d['pp_volmix']
+            gp_p1_bl = d['gp_start'] if d['gp_start'] else 1
             bridge_data.append({
                 'Scope': bl,
                 'GP P1': d['gp_start'],
                 'GP P2': d['gp_end'],
                 'GP Δ': d['gp_end'] - d['gp_start'],
+                'Growth %': (d['gp_end'] - d['gp_start']) / gp_p1_bl * 100,
                 '1. Churned (Rp)': -d['gp_dep'],
                 '2. Existing (Rp)': existing_rp,
                 '  2.1 COGS (Rp)': d['cogs_rp'],
@@ -680,6 +907,7 @@ if st.session_state.analysis is not None:
         st.dataframe(
             bdf.style.format({
                 'GP P1': '{:,.0f}', 'GP P2': '{:,.0f}', 'GP Δ': '{:,.0f}',
+                'Growth %': '{:+.2f}%',
                 '1. Churned (Rp)': '{:,.0f}', '2. Existing (Rp)': '{:,.0f}',
                 '  2.1 COGS (Rp)': '{:,.0f}', '  2.2 Price (Rp)': '{:,.0f}',
                 '  2.3 Vol/Mix (Rp)': '{:,.0f}', '3. New SKU (Rp)': '{:,.0f}',
@@ -744,58 +972,114 @@ if st.session_state.analysis is not None:
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # ZONE 4.5 — TOP MOVERS
+    # ZONE 4.5 — TOP MOVERS (3 SECTIONS: GP / PRICE / COGS)
     # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">🔝 Top Movers (Existing SKU only)</div>', unsafe_allow_html=True)
-    st.caption("Top 10 gainers & losers by GP change. Field driver kosong untuk diisi manual sesuai konteks bisnis.")
-
-    gainers, losers = compute_top_movers(df, n=10)
-
-    mv_col1, mv_col2 = st.columns(2)
+    st.caption("Per-SKU decomposition: COGS + Price + Vol/Mix Effect sum to GP Δ. "
+               "Note: di per-SKU level, Vol/Mix Effect = qty change × unit margin P2 (pure volume; "
+               "mix shift hanya bermakna di aggregate level).")
 
     name_col = 'product_name' if 'product_name' in df.columns else ('sku_name' if 'sku_name' in df.columns else None)
     id_col = 'product_id' if 'product_id' in df.columns else ('sku_id' if 'sku_id' in df.columns else None)
 
-    def mover_table(d, kind='gain'):
+    def mover_table_full(d):
+        """Build full table with decomposition + Δ Rp + Growth %."""
         rows = []
         for i, (_, r) in enumerate(d.iterrows(), 1):
             name = r.get(name_col, '—') if name_col else '—'
             bl = r.get('pricing_bl', '—')
             l1 = r.get('l1_category', '—')
+
             gp_d = r.get('gp_diff', 0)
+            cogs_eff = r.get('cogs_effect', 0)
+            price_eff = r.get('price_effect', 0)
+            volmix_eff = r.get('volmix_effect', 0)
+            gp_growth = r.get('gp_growth_pct', np.nan)
+
+            price_diff_rp = r.get('price_diff_rp', 0)
+            price_diff_pct = r.get('price_diff_pct', np.nan)
+            cogs_diff_rp = r.get('cogs_diff_rp', 0)
+            cogs_diff_pct = r.get('cogs_diff_pct', np.nan)
+
             qty_pct = r.get('qty_diff_pct', np.nan)
-            price_s = r.get('price_status', '—') or '—'
-            cogs_s = r.get('cogs_status', '—') or '—'
             comp_s = r.get('comp_status', '—') or '—'
+
             pi_p1 = r.get('pi_p1', np.nan)
             pi_p2 = r.get('pi_p2', np.nan)
             pi_txt = f"{pi_p1:.0f}→{pi_p2:.0f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—"
+
             rows.append({
                 '#': i,
-                'Product': str(name)[:40],
-                'BL': bl, 'L1': l1,
-                'GP Δ': gp_d,
+                'Product': str(name)[:35],
+                'BL': bl,
+                'L1': l1,
+                'GP Δ Rp': gp_d,
+                'COGS Effect': cogs_eff,
+                'Price Effect': price_eff,
+                'Vol/Mix Effect': volmix_eff,
+                'GP Growth %': gp_growth,
+                'Price Δ Rp': price_diff_rp,
+                'Price Δ%': price_diff_pct,
+                'COGS Δ Rp': cogs_diff_rp,
+                'COGS Δ%': cogs_diff_pct,
                 'Qty Δ%': qty_pct,
-                'Price': price_s, 'COGS': cogs_s, 'Comp': comp_s,
+                'Comp': comp_s,
                 'PI': pi_txt,
-                'Driver (isi manual)': '',
+                'Driver': '',
             })
         return pd.DataFrame(rows)
 
-    with mv_col1:
+    fmt_movers = {
+        'GP Δ Rp': '{:+,.0f}',
+        'COGS Effect': '{:+,.0f}',
+        'Price Effect': '{:+,.0f}',
+        'Vol/Mix Effect': '{:+,.0f}',
+        'GP Growth %': '{:+.1f}%',
+        'Price Δ Rp': '{:+,.0f}',
+        'Price Δ%': '{:+.2%}',
+        'COGS Δ Rp': '{:+,.0f}',
+        'COGS Δ%': '{:+.2%}',
+        'Qty Δ%': '{:+.1%}',
+    }
+
+    # ── SECTION A: TOP GP MOVERS ────────────────────────────────────────
+    st.markdown("### A. Top 10 GP Movers")
+    gp_gainers, gp_losers = compute_top_movers_gp(df, n=10)
+    mv_a1, mv_a2 = st.columns(2)
+    with mv_a1:
         st.markdown("**🟢 Top 10 GP Gainers**")
-        gdf = mover_table(gainers, 'gain')
-        st.dataframe(
-            gdf.style.format({'GP Δ': '{:+,.0f}', 'Qty Δ%': '{:+.1%}'}),
-            use_container_width=True, hide_index=True, height=410
-        )
-    with mv_col2:
+        df_a1 = mover_table_full(gp_gainers)
+        st.dataframe(df_a1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+    with mv_a2:
         st.markdown("**🔴 Top 10 GP Losers**")
-        ldf = mover_table(losers, 'loss')
-        st.dataframe(
-            ldf.style.format({'GP Δ': '{:+,.0f}', 'Qty Δ%': '{:+.1%}'}),
-            use_container_width=True, hide_index=True, height=410
-        )
+        df_a2 = mover_table_full(gp_losers)
+        st.dataframe(df_a2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+
+    # ── SECTION B: TOP PRICE MOVERS ─────────────────────────────────────
+    st.markdown("### B. Top 10 Price Movers")
+    price_ups, price_downs = compute_top_movers_price(df, n=10)
+    mv_b1, mv_b2 = st.columns(2)
+    with mv_b1:
+        st.markdown("**🔼 Top 10 Price Up**")
+        df_b1 = mover_table_full(price_ups)
+        st.dataframe(df_b1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+    with mv_b2:
+        st.markdown("**🔽 Top 10 Price Down**")
+        df_b2 = mover_table_full(price_downs)
+        st.dataframe(df_b2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+
+    # ── SECTION C: TOP COGS MOVERS ──────────────────────────────────────
+    st.markdown("### C. Top 10 COGS Movers")
+    cogs_ups, cogs_downs = compute_top_movers_cogs(df, n=10)
+    mv_c1, mv_c2 = st.columns(2)
+    with mv_c1:
+        st.markdown("**🔼 Top 10 COGS Up**")
+        df_c1 = mover_table_full(cogs_ups)
+        st.dataframe(df_c1.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
+    with mv_c2:
+        st.markdown("**🔽 Top 10 COGS Down**")
+        df_c2 = mover_table_full(cogs_downs)
+        st.dataframe(df_c2.style.format(fmt_movers), use_container_width=True, hide_index=True, height=410)
 
     # ─────────────────────────────────────────────────────────────────────
     # ZONE 5 — SKU WATCH LIST (PRIORITY)
