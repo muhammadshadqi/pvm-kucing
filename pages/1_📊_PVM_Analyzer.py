@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-from pvm_analyzer_v3 import analyze
+from pvm_analyzer_v3 import analyze, compute as pvm_compute, generate_excel as pvm_generate_excel
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -22,6 +22,27 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="auto",
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CACHED HELPERS (analytical computation cached by file hash)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=3)
+def cached_pvm_compute(file_bytes, file_name):
+    """Cache PVM compute result. Excel NOT included."""
+    import io
+    if file_name.lower().endswith('.csv'):
+        df = pd.read_csv(io.BytesIO(file_bytes))
+    else:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    return pvm_compute(df)
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def cached_pvm_excel_bytes(file_bytes, file_name):
+    """Cache PVM Excel bytes (separate from compute)."""
+    result = cached_pvm_compute(file_bytes, file_name)
+    return pvm_generate_excel(result)
 
 # Custom CSS — minimal, focused on KPI cards & banner
 st.markdown("""
@@ -915,10 +936,14 @@ def make_template_excel():
 # ─────────────────────────────────────────────────────────────────────────────
 if 'pvm_analysis' not in st.session_state:
     st.session_state.pvm_analysis = None
+if 'pvm_file_bytes' not in st.session_state:
+    st.session_state.pvm_file_bytes = None
 if 'pvm_uploaded_file_name' not in st.session_state:
     st.session_state.pvm_uploaded_file_name = None
 if 'pvm_uploaded_file_size' not in st.session_state:
     st.session_state.pvm_uploaded_file_size = None
+if 'pvm_excel_ready' not in st.session_state:
+    st.session_state.pvm_excel_ready = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
@@ -932,8 +957,12 @@ with col_clear:
     if st.session_state.pvm_analysis is not None:
         if st.button("🗑️ Clear data", type="secondary", use_container_width=True):
             st.session_state.pvm_analysis = None
+            st.session_state.pvm_file_bytes = None
             st.session_state.pvm_uploaded_file_name = None
             st.session_state.pvm_uploaded_file_size = None
+            st.session_state.pvm_excel_ready = False
+            if 'pvm_excel_bytes' in st.session_state:
+                del st.session_state.pvm_excel_bytes
             st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,12 +1000,15 @@ file_changed = (
      st.session_state.pvm_analysis is None)
 )
 if file_changed:
+    # Read file bytes ONCE for caching
+    file_bytes = uploaded.getvalue()
     # Load file
     try:
+        import io
         if uploaded.name.lower().endswith('.csv'):
-            df_input = pd.read_csv(uploaded)
+            df_input = pd.read_csv(io.BytesIO(file_bytes))
         else:
-            df_input = pd.read_excel(uploaded)
+            df_input = pd.read_excel(io.BytesIO(file_bytes))
     except Exception as e:
         st.error(f"❌ Gagal load file: {e}")
         st.stop()
@@ -1037,12 +1069,13 @@ if file_changed:
         st.error("Tidak bisa lanjut. Kolom wajib hilang. Cek format sesuai template.")
         st.stop()
 
-    # Process
+    # Process — FAST path (cached compute, no Excel build yet)
     if st.button("🚀 Process Data", type="primary", use_container_width=False):
-        with st.spinner("Processing... (mungkin 10-30 detik untuk file besar)"):
+        with st.spinner("Processing... (fast path ~1 detik)"):
             try:
-                result = analyze(df_input, progress_callback=lambda m, c, t: None)
+                result = cached_pvm_compute(file_bytes, uploaded.name)
                 st.session_state.pvm_analysis = result
+                st.session_state.pvm_file_bytes = file_bytes
                 st.session_state.pvm_uploaded_file_name = uploaded.name
                 st.session_state.pvm_uploaded_file_size = uploaded.size
                 st.success(f"✅ Data processed: {result['meta']['n_rows']:,} rows enriched")
@@ -1978,18 +2011,42 @@ if st.session_state.pvm_analysis is not None:
                f"Download Full Excel di bawah untuk akses lengkap.")
 
     # ─────────────────────────────────────────────────────────────────────
-    # DOWNLOAD FULL EXCEL
+    # DOWNLOAD FULL EXCEL (LAZY — only build when user clicks)
     # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">💾 Download Output</div>', unsafe_allow_html=True)
-    st.caption(f"File output: 12 sheet identical dengan `pvm_analyzer_v3.py`. Size: {len(A['excel_bytes'])/1024/1024:.1f} MB.")
-    st.download_button(
-        f"📥 Download Full Excel ({p1}_vs_{p2}_enriched.xlsx)",
-        data=A['excel_bytes'],
-        file_name=f"{p1}_vs_{p2}_enriched.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=False,
-    )
+    st.caption("File output: 12 sheet identical dengan `pvm_analyzer_v3.py`. "
+               "Build Excel akan butuh ~20-30 detik. Klik tombol di bawah saat lo butuh.")
+
+    if not st.session_state.pvm_excel_ready:
+        if st.button("🔨 Build Excel Report (~25s)", type="primary", key='pvm_excel_prepare'):
+            with st.spinner("Building Excel workbook... ini bisa makan ~25 detik."):
+                try:
+                    excel_bytes = cached_pvm_excel_bytes(
+                        st.session_state.pvm_file_bytes,
+                        st.session_state.pvm_uploaded_file_name
+                    )
+                    st.session_state.pvm_excel_bytes = excel_bytes
+                    st.session_state.pvm_excel_ready = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Excel build error: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    else:
+        st.success(f"✅ Excel ready ({len(st.session_state.pvm_excel_bytes)/1024/1024:.1f} MB)")
+        st.download_button(
+            f"📥 Download Full Excel ({p1}_vs_{p2}_enriched.xlsx)",
+            data=st.session_state.pvm_excel_bytes,
+            file_name=f"{p1}_vs_{p2}_enriched.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=False,
+        )
+        if st.button("🔄 Rebuild Excel", type="secondary", key='pvm_excel_rebuild'):
+            st.session_state.pvm_excel_ready = False
+            if 'pvm_excel_bytes' in st.session_state:
+                del st.session_state.pvm_excel_bytes
+            st.rerun()
 
 else:
     # No data state
