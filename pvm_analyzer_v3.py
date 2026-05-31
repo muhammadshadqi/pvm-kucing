@@ -2416,26 +2416,18 @@ def main():
 # ══════════════════════════════════════════════════════════════════════════════
 # MODULE API — for Streamlit / other callers
 # ══════════════════════════════════════════════════════════════════════════════
-def analyze(df_input, p1_label=None, p2_label=None, progress_callback=None):
+def compute(df_input, p1_label=None, p2_label=None):
     """
-    Process raw dataframe (already loaded) → enriched df + pvm dict + Excel bytes.
+    Fast analytical computation only — NO Excel workbook generation.
+    Returns dict for Streamlit display (fast).
 
     Args:
-        df_input: pandas DataFrame (raw input as expected by pvm_analyzer_v3)
-        p1_label: optional override for Period 1 label (used if no period cols detected)
-        p2_label: optional override for Period 2 label
-        progress_callback: optional callable(msg, current, total) for progress reporting
+        df_input: raw input DataFrame
+        p1_label, p2_label: optional period label overrides
 
     Returns:
-        dict with keys:
-            'df'        : enriched DataFrame (per-SKU, all enrichment cols added)
-            'pvm'       : dict per BL (Dry/Fresh/Frozen/PL/TOTAL) with margin bridge components
-            'excel_bytes': bytes of the full 12-sheet Excel output
-            'p1'        : period 1 label string
-            'p2'        : period 2 label string
-            'meta'      : dict with row counts, column counts, missing cols, warnings
+        dict with keys: df, pvm, p1, p2, meta, p1c, p2c
     """
-    import io
     df = df_input.copy()
 
     # Period detection
@@ -2449,51 +2441,15 @@ def analyze(df_input, p1_label=None, p2_label=None, progress_callback=None):
     else:
         p1, p2 = get_dates(df, p1c, p2c)
 
-    # Detect missing optional columns for metadata
+    # Detect missing optional columns
     optional_cols = ['comp_price', 'comp_price1', 'pi', 'pi1',
                      'avg_stock', 'avg_stock1', 'pareto_classification',
                      'margin_pct', 'margin1_pct']
     missing_optional = [c for c in optional_cols if c not in df.columns]
 
     df = ensure_cols(df)
-
-    # Optional progress callback wrapper (override module-level `progress`)
-    global progress
-    original_progress = progress
-    if progress_callback is not None:
-        def _pcb(msg, cur, tot):
-            try: progress_callback(msg, cur, tot)
-            except Exception: pass
-        progress = _pcb
-
-    try:
-        # Enrich
-        df = enrich(df, p1c, p2c)
-
-        # Compute PVM
-        pvm = compute_pvm(df)
-
-        # Build Excel workbook
-        wb = Workbook()
-        write_s1(wb, df, p1, p2)
-        write_exec(wb, df, pvm, p1, p2)
-        AGG = write_s1b(wb, pvm, p1, p2)
-        write_s2(wb, pvm, AGG, p1, p2)
-        write_s2b(wb, df, pvm, AGG, p1, p2)
-        write_s3(wb, df, p1, p2)
-        write_s4(wb, df, p1, p2)
-        write_s5(wb, df, p1, p2)
-        write_s6(wb, df, p1, p2)
-        write_s7(wb, df, p1, p2)
-        write_s0(wb, p1, p2)
-
-        # Serialize to bytes
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        excel_bytes = buf.getvalue()
-    finally:
-        progress = original_progress
+    df = enrich(df, p1c, p2c)
+    pvm = compute_pvm(df)
 
     meta = {
         'n_rows': len(df),
@@ -2507,11 +2463,67 @@ def analyze(df_input, p1_label=None, p2_label=None, progress_callback=None):
     return {
         'df': df,
         'pvm': pvm,
-        'excel_bytes': excel_bytes,
         'p1': p1,
         'p2': p2,
+        'p1c': p1c,
+        'p2c': p2c,
         'meta': meta,
     }
+
+
+def generate_excel(result, progress_callback=None):
+    """
+    Generate Excel workbook from compute() result.
+    SLOW (~20s for 12K rows) — only call when user requests download.
+
+    Returns:
+        bytes of Excel workbook
+    """
+    import io
+    df = result['df']
+    pvm = result['pvm']
+    p1 = result['p1']
+    p2 = result['p2']
+
+    # Optional progress callback
+    global progress
+    original_progress = progress
+    if progress_callback is not None:
+        def _pcb(msg, cur, tot):
+            try: progress_callback(msg, cur, tot)
+            except Exception: pass
+        progress = _pcb
+
+    try:
+        wb = Workbook()
+        write_s1(wb, df, p1, p2)
+        write_exec(wb, df, pvm, p1, p2)
+        AGG = write_s1b(wb, pvm, p1, p2)
+        write_s2(wb, pvm, AGG, p1, p2)
+        write_s2b(wb, df, pvm, AGG, p1, p2)
+        write_s3(wb, df, p1, p2)
+        write_s4(wb, df, p1, p2)
+        write_s5(wb, df, p1, p2)
+        write_s6(wb, df, p1, p2)
+        write_s7(wb, df, p1, p2)
+        write_s0(wb, p1, p2)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+    finally:
+        progress = original_progress
+
+
+def analyze(df_input, p1_label=None, p2_label=None, progress_callback=None):
+    """
+    Legacy wrapper for backwards compatibility — runs compute() + generate_excel().
+    For Streamlit, prefer using compute() + generate_excel() separately.
+    """
+    result = compute(df_input, p1_label, p2_label)
+    result['excel_bytes'] = generate_excel(result, progress_callback)
+    return result
 
 
 if __name__=="__main__":
