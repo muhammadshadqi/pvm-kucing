@@ -409,15 +409,15 @@ def build_bl_contribution_df(pvm):
     Tabel 2 — BL Contribution to Overall margin change.
     Methodology (matches Sheet 2 Tabel 3 in pvm_analyzer_v3.py):
       Per-effect contribution per BL = pp_step_BL × GV_weight_P2_BL
-      Σ Within (via components) = sum of per-effect contributions = direct
-      Within Effect (direct) = ΔMargin_BL × GV_weight_P2_BL
-      Residual = (Σ Within via components) - (Within Effect direct) ≈ 0
+      Σ Margin Change (via components) = sum of per-effect contributions
+      Margin Change Effect (direct) = ΔMargin_BL × GV_weight_P2_BL
+      Residual = (Σ via components) - (direct) ≈ 0
       BL Mix Effect = ΔWeight_BL × Margin_P1_BL
-      Total Overall = Within (direct) + BL Mix Effect = Actual Overall ΔMargin (exact identity)
+      Total Overall = Margin Change (direct) + BL Mix Effect = Actual Overall ΔMargin (exact identity)
 
     Rows: 1. Churned, 2. Existing (sum), 2.1 COGS, 2.2 Price, 2.3 Vol/Mix, 3. New SKU,
-          Σ Within (via components), Within Effect (direct), Residual (via - direct),
-          BL Mix Effect, Total Overall.
+          Σ Margin Change Effect (via components), Margin Change Effect (direct),
+          Residual (via - direct), BL Mix Effect, Total Overall.
     Cols: Dry contrib, Fresh contrib, Frozen contrib, PL contrib, Overall.
     """
     bls = ['Dry', 'Fresh', 'Frozen', 'PL']
@@ -448,8 +448,8 @@ def build_bl_contribution_df(pvm):
         row.append(sum(row[1:]))  # Overall = sum
         rows.append(row)
 
-    # Σ Within (via components) = sum of 1.Churned + 2.Existing + 3.New per BL
-    sum_within_row = ['Σ Within (via components)']
+    # Σ Margin Change Effect (via components) = sum of 1.Churned + 2.Existing + 3.New per BL
+    sum_within_row = ['Σ Margin Change Effect (via components)']
     for bl in bls:
         v = (pvm[bl]['pp_B'] + pvm[bl]['pp_cogs'] + pvm[bl]['pp_price']
              + pvm[bl]['pp_volmix'] + pvm[bl]['pp_G']) * weights_p2[bl] * 100
@@ -457,8 +457,8 @@ def build_bl_contribution_df(pvm):
     sum_within_row.append(sum(sum_within_row[1:]))
     rows.append(sum_within_row)
 
-    # Within Effect (direct) = ΔMargin_BL × weight_P2_BL
-    direct_row = ['Within Effect (direct)']
+    # Margin Change Effect (direct) = ΔMargin_BL × weight_P2_BL
+    direct_row = ['Margin Change Effect (direct)']
     for bl in bls:
         v = pvm[bl]['pp_total'] * weights_p2[bl] * 100
         direct_row.append(v)
@@ -482,7 +482,7 @@ def build_bl_contribution_df(pvm):
     blmix_row.append(sum(blmix_row[1:]))
     rows.append(blmix_row)
 
-    # Total Overall = Within (direct) + BL Mix
+    # Total Overall = Margin Change (direct) + BL Mix
     total_row = ['Total Overall']
     for i in range(1, 5):  # per BL: leave blank as concept doesn't apply per-BL
         total_row.append(None)
@@ -603,93 +603,188 @@ def compute_l1_pvm(df, scope='TOTAL'):
 
 def build_l1_decomp_df(df, scope='TOTAL', mode='rp'):
     """
-    Tabel L1 baru — L1 effect breakdown per scope.
-    Cols: L1 Category, BL, 1.Churned, 2.Existing, 2.1 COGS, 2.2 Price, 2.3 Vol/Mix, 3.New, Total Δ
-    For mode='pp_contrib', also adds: GV Weight Effect.
+    Tabel L1 PVM Decomposition — L1 effect breakdown per scope, dengan kolom kontekstual.
 
-    mode:
-      - 'rp': Rupiah (effects in Rp)
-      - 'pct': Growth % of L1 GP P1
-      - 'pp': Margin pp within L1
-      - 'pp_contrib': L1 contribution to scope's margin pp change.
-                     Methodology mirrors Sheet 2 Tabel 2/2b:
-                     Effect contrib = pp_L1 × GV_weight_P2_L1_in_scope
-                     GV Weight Effect = ΔWeight_L1 × Margin_P1_L1
-                     Sum (Within + GV Weight) = scope's actual ΔMargin
+    Layout per mode:
+      - 'rp': L1 | BL | GP P1 | GV Weight P1 | [effects in Rp] | Total Δ | GP P2 | GV Weight P2
+      - 'pct': L1 | BL | GP P1 | GV Weight P1 | [effects in growth%] | Total Δ | GP P2 | GV Weight P2
+      - 'pp': L1 | BL | Margin P1 | GV Weight P1 | [effects in pp within L1] | Total Δ | Margin P2 | GV Weight P2
+      - 'pp_contrib': L1 | BL | Margin P1 | GV Weight P1 | [effects in pp×weight] | Margin Change Effect | GV Weight Effect | Total Δ | Margin P2 | GV Weight P2
+
+    GV Weight = L1_GV / scope_total_GV (terhadap scope yang dipilih).
+
+    Math identity untuk pp_contrib mode:
+      Margin Change Effect_L1 = pp_total_L1 × weight_P2_L1_in_scope
+      GV Weight Effect_L1 = ΔWeight_L1_in_scope × Margin_P1_L1
+      Total Δ_L1 = Margin Change + GV Weight
+      Σ across L1 in scope = scope's actual ΔMargin (exact)
     """
     l1_data = compute_l1_pvm(df, scope=scope)
     if not l1_data:
         return pd.DataFrame()
 
+    # Scope-level GV totals (for weighting)
+    total_gv_p1 = sum(d['gv_start'] for d in l1_data.values())
+    total_gv_p2 = sum(d['gv_end'] for d in l1_data.values())
+
     rows = []
+    for l1, d in l1_data.items():
+        bl = d['pricing_bl']
+        w_p1 = d['gv_start'] / total_gv_p1 if total_gv_p1 else 0
+        w_p2 = d['gv_end'] / total_gv_p2 if total_gv_p2 else 0
 
-    if mode == 'pp_contrib':
-        # Scope-level GV totals for weighting
-        total_gv_p1 = sum(d['gv_start'] for d in l1_data.values())
-        total_gv_p2 = sum(d['gv_end'] for d in l1_data.values())
-
-        for l1, d in l1_data.items():
-            bl = d['pricing_bl']
-            w_p1 = d['gv_start'] / total_gv_p1 if total_gv_p1 else 0
-            w_p2 = d['gv_end'] / total_gv_p2 if total_gv_p2 else 0
-            delta_w = w_p2 - w_p1
-
-            # Within effects (pp_L1 × w_p2)
+        if mode == 'rp':
             row = {
                 'L1 Category': l1, 'BL': bl,
-                '1. Churned': d['pp_B'] * w_p2 * 100,
-                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * w_p2 * 100,
-                '  2.1 COGS': d['pp_cogs'] * w_p2 * 100,
-                '  2.2 Price': d['pp_price'] * w_p2 * 100,
-                '  2.3 Vol/Mix': d['pp_volmix'] * w_p2 * 100,
-                '3. New': d['pp_G'] * w_p2 * 100,
-                'GV Weight Effect': delta_w * d['m_base'] * 100,  # L1 Mix
-                'Total Δ': d['pp_total'] * w_p2 * 100 + delta_w * d['m_base'] * 100,
+                'GP P1': d['gp_start'],
+                'GV Weight P1': w_p1,
+                '1. Churned': -d['gp_dep'],
+                '2. Existing': d['cogs_rp'] + d['price_rp'] + d['volmix_rp'],
+                '  2.1 COGS': d['cogs_rp'],
+                '  2.2 Price': d['price_rp'],
+                '  2.3 Vol/Mix': d['volmix_rp'],
+                '3. New': d['gp_new'],
+                'Total Δ': d['gp_end'] - d['gp_start'],
+                'GP P2': d['gp_end'],
+                'GV Weight P2': w_p2,
             }
-            rows.append(row)
-    else:
-        for l1, d in l1_data.items():
-            bl = d['pricing_bl']
-            if mode == 'rp':
-                row = {
-                    'L1 Category': l1, 'BL': bl,
-                    '1. Churned': -d['gp_dep'],
-                    '2. Existing': d['cogs_rp'] + d['price_rp'] + d['volmix_rp'],
-                    '  2.1 COGS': d['cogs_rp'],
-                    '  2.2 Price': d['price_rp'],
-                    '  2.3 Vol/Mix': d['volmix_rp'],
-                    '3. New': d['gp_new'],
-                    'Total Δ': d['gp_end'] - d['gp_start'],
-                }
-            elif mode == 'pct':
-                gp1 = d['gp_start'] if d['gp_start'] else 1
-                row = {
-                    'L1 Category': l1, 'BL': bl,
-                    '1. Churned': (-d['gp_dep']) / gp1 * 100,
-                    '2. Existing': (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp1 * 100,
-                    '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
-                    '  2.2 Price': d['price_rp'] / gp1 * 100,
-                    '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
-                    '3. New': d['gp_new'] / gp1 * 100,
-                    'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
-                }
-            else:  # pp (within L1 margin)
-                row = {
-                    'L1 Category': l1, 'BL': bl,
-                    '1. Churned': d['pp_B'] * 100,
-                    '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
-                    '  2.1 COGS': d['pp_cogs'] * 100,
-                    '  2.2 Price': d['pp_price'] * 100,
-                    '  2.3 Vol/Mix': d['pp_volmix'] * 100,
-                    '3. New': d['pp_G'] * 100,
-                    'Total Δ': d['pp_total'] * 100,
-                }
-            rows.append(row)
+        elif mode == 'pct':
+            gp1 = d['gp_start'] if d['gp_start'] else 1
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'GP P1': d['gp_start'],
+                'GV Weight P1': w_p1,
+                '1. Churned': (-d['gp_dep']) / gp1 * 100,
+                '2. Existing': (d['cogs_rp'] + d['price_rp'] + d['volmix_rp']) / gp1 * 100,
+                '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
+                '  2.2 Price': d['price_rp'] / gp1 * 100,
+                '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
+                '3. New': d['gp_new'] / gp1 * 100,
+                'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
+                'GP P2': d['gp_end'],
+                'GV Weight P2': w_p2,
+            }
+        elif mode == 'pp':
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': w_p1,
+                '1. Churned': d['pp_B'] * 100,
+                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
+                '  2.1 COGS': d['pp_cogs'] * 100,
+                '  2.2 Price': d['pp_price'] * 100,
+                '  2.3 Vol/Mix': d['pp_volmix'] * 100,
+                '3. New': d['pp_G'] * 100,
+                'Total Δ': d['pp_total'] * 100,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': w_p2,
+            }
+        else:  # pp_contrib
+            delta_w = w_p2 - w_p1
+            churned_c = d['pp_B'] * w_p2 * 100
+            cogs_c = d['pp_cogs'] * w_p2 * 100
+            price_c = d['pp_price'] * w_p2 * 100
+            volmix_c = d['pp_volmix'] * w_p2 * 100
+            new_c = d['pp_G'] * w_p2 * 100
+            existing_c = cogs_c + price_c + volmix_c
+            margin_change_total = churned_c + existing_c + new_c  # = pp_total × w_p2 × 100
+            gv_weight_effect = delta_w * d['m_base'] * 100
+            row = {
+                'L1 Category': l1, 'BL': bl,
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': w_p1,
+                '1. Churned': churned_c,
+                '2. Existing': existing_c,
+                '  2.1 COGS': cogs_c,
+                '  2.2 Price': price_c,
+                '  2.3 Vol/Mix': volmix_c,
+                '3. New': new_c,
+                'Margin Change Effect': margin_change_total,
+                'GV Weight Effect': gv_weight_effect,
+                'Total Δ': margin_change_total + gv_weight_effect,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': w_p2,
+            }
+        rows.append(row)
 
     out = pd.DataFrame(rows)
     if not out.empty:
         out = out.sort_values('Total Δ', ascending=False).reset_index(drop=True)
     return out
+
+
+def build_l1_overall_row(df, scope, mode, pvm):
+    """
+    Build single 'Overall' row for Tabel L1 (placed at bottom).
+
+    Sum-able modes (rp, pp_contrib):
+      Row Overall = sum of all L1 (column-wise sum) — exact match with scope's actual total
+
+    Non-sum-able modes (pct, pp):
+      Row Overall = scope-level aggregate (compute fresh, NOT sum of L1)
+      Reason: growth%/margin pp are non-linear (denominator-dependent), sum-of-L1 != scope-level
+    """
+    scope_data = pvm.get(scope) if scope != 'TOTAL' else pvm.get('TOTAL')
+    if not scope_data:
+        return None
+
+    if mode in ('rp', 'pp_contrib'):
+        # Sum-able: compute fresh from compute_l1_pvm and sum columns
+        ldf = build_l1_decomp_df(df, scope=scope, mode=mode)
+        if ldf.empty:
+            return None
+        overall = {'L1 Category': 'OVERALL (Sum L1)', 'BL': '—'}
+        for col in ldf.columns:
+            if col in ('L1 Category', 'BL'): continue
+            if col in ('GV Weight P1', 'GV Weight P2'):
+                overall[col] = 1.0  # 100% by definition of scope
+            elif col in ('GP P1', 'GP P2', 'Margin P1', 'Margin P2'):
+                # Show scope-level absolute baseline
+                if col == 'GP P1':
+                    overall[col] = scope_data['gp_start']
+                elif col == 'GP P2':
+                    overall[col] = scope_data['gp_end']
+                elif col == 'Margin P1':
+                    overall[col] = scope_data['m_base'] * 100
+                elif col == 'Margin P2':
+                    overall[col] = scope_data['m_end'] * 100
+            else:
+                overall[col] = ldf[col].sum()
+        return overall
+    else:  # pct, pp — non-sum-able, compute scope-level fresh
+        d = scope_data
+        if mode == 'pct':
+            gp1 = d['gp_start'] if d['gp_start'] else 1
+            existing_rp = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
+            return {
+                'L1 Category': 'OVERALL (Scope-level)', 'BL': '—',
+                'GP P1': d['gp_start'],
+                'GV Weight P1': 1.0,
+                '1. Churned': (-d['gp_dep']) / gp1 * 100,
+                '2. Existing': existing_rp / gp1 * 100,
+                '  2.1 COGS': d['cogs_rp'] / gp1 * 100,
+                '  2.2 Price': d['price_rp'] / gp1 * 100,
+                '  2.3 Vol/Mix': d['volmix_rp'] / gp1 * 100,
+                '3. New': d['gp_new'] / gp1 * 100,
+                'Total Δ': (d['gp_end'] - d['gp_start']) / gp1 * 100,
+                'GP P2': d['gp_end'],
+                'GV Weight P2': 1.0,
+            }
+        else:  # pp (within L1)
+            return {
+                'L1 Category': 'OVERALL (Scope-level)', 'BL': '—',
+                'Margin P1': d['m_base'] * 100,
+                'GV Weight P1': 1.0,
+                '1. Churned': d['pp_B'] * 100,
+                '2. Existing': (d['pp_cogs'] + d['pp_price'] + d['pp_volmix']) * 100,
+                '  2.1 COGS': d['pp_cogs'] * 100,
+                '  2.2 Price': d['pp_price'] * 100,
+                '  2.3 Vol/Mix': d['pp_volmix'] * 100,
+                '3. New': d['pp_G'] * 100,
+                'Total Δ': d['pp_total'] * 100,
+                'Margin P2': d['m_end'] * 100,
+                'GV Weight P2': 1.0,
+            }
 
 
 
@@ -1325,9 +1420,9 @@ if st.session_state.analysis is not None:
 
     # ── TABEL 2: BL Contribution to Overall (fix pp, gradient) ───────────
     st.markdown("##### 📊 Tabel 2: BL Contribution to Overall Margin Change")
-    st.caption("Decomposes Overall ΔMargin into **Within Effect** (margin change per BL × GV weight P2) + "
+    st.caption("Decomposes Overall ΔMargin into **Margin Change Effect** (margin change per BL × GV weight P2) + "
                "**BL Mix Effect** (GV weight shift × Margin P1). "
-               "**Math identity:** Σ Within + Σ BL Mix = Total Overall = Actual ΔMargin Overall (exact). "
+               "**Math identity:** Σ Margin Change + Σ BL Mix = Total Overall = Actual ΔMargin Overall (exact). "
                "Fix pp, tidak ikut unit toggle.")
 
     contrib_df = build_bl_contribution_df(pvm)
@@ -1394,15 +1489,32 @@ if st.session_state.analysis is not None:
         use_container_width=True, hide_index=True
     )
 
-    # Per-BL contribution table below (Rp + Growth %)
+    # Per-BL contribution table below (Rp + Growth % + GV)
     with st.expander("📋 Breakdown numerical Rp (semua BL)", expanded=False):
+        # Compute total GV per periode for weight calc
+        total_gv_p1_all = sum(pvm[bl]['gv_start'] for bl in BL_ORDER)
+        total_gv_p2_all = sum(pvm[bl]['gv_end'] for bl in BL_ORDER)
+
         bridge_data = []
         for bl in ['TOTAL'] + BL_ORDER:
             d = pvm[bl]
             existing_rp = d['cogs_rp'] + d['price_rp'] + d['volmix_rp']
             gp_p1_bl = d['gp_start'] if d['gp_start'] else 1
+
+            # GV Weight = BL_GV / total_GV per periode
+            if bl == 'TOTAL':
+                gv_wt_p1 = 1.0
+                gv_wt_p2 = 1.0
+            else:
+                gv_wt_p1 = d['gv_start'] / total_gv_p1_all if total_gv_p1_all else 0
+                gv_wt_p2 = d['gv_end'] / total_gv_p2_all if total_gv_p2_all else 0
+
             bridge_data.append({
                 'Scope': bl,
+                'GV P1': d['gv_start'],
+                'GV P2': d['gv_end'],
+                'GV Weight P1': gv_wt_p1,
+                'GV Weight P2': gv_wt_p2,
                 'GP P1': d['gp_start'],
                 'GP P2': d['gp_end'],
                 'GP Δ': d['gp_end'] - d['gp_start'],
@@ -1420,6 +1532,8 @@ if st.session_state.analysis is not None:
         bdf = pd.DataFrame(bridge_data)
         st.dataframe(
             bdf.style.format({
+                'GV P1': '{:,.0f}', 'GV P2': '{:,.0f}',
+                'GV Weight P1': '{:.2%}', 'GV Weight P2': '{:.2%}',
                 'GP P1': '{:,.0f}', 'GP P2': '{:,.0f}', 'GP Δ': '{:,.0f}',
                 'Growth %': '{:+.2f}%',
                 '1. Churned (Rp)': '{:,.0f}', '2. Existing (Rp)': '{:,.0f}',
@@ -1516,15 +1630,33 @@ if st.session_state.analysis is not None:
         if l1_decomp.empty:
             st.info("Tidak ada data L1 untuk scope ini.")
         else:
-            # Format cells (effect_cols vary by mode)
+            # Effect columns vary by mode
+            base_effect_cols = ['1. Churned', '2. Existing', '  2.1 COGS', '  2.2 Price',
+                                '  2.3 Vol/Mix', '3. New']
             if l1_mode == 'pp_contrib':
-                effect_cols = ['1. Churned', '2. Existing', '  2.1 COGS', '  2.2 Price',
-                               '  2.3 Vol/Mix', '3. New', 'GV Weight Effect', 'Total Δ']
+                effect_cols = base_effect_cols + ['Margin Change Effect', 'GV Weight Effect', 'Total Δ']
             else:
-                effect_cols = ['1. Churned', '2. Existing', '  2.1 COGS', '  2.2 Price',
-                               '  2.3 Vol/Mix', '3. New', 'Total Δ']
+                effect_cols = base_effect_cols + ['Total Δ']
 
-            def fmt_cell(v, mode_):
+            # Context columns (left side baseline + GV weight, right side end-state + GV weight)
+            if l1_mode in ('rp', 'pct'):
+                left_context_cols = ['GP P1', 'GV Weight P1']
+                right_context_cols = ['GP P2', 'GV Weight P2']
+            else:  # pp, pp_contrib
+                left_context_cols = ['Margin P1', 'GV Weight P1']
+                right_context_cols = ['Margin P2', 'GV Weight P2']
+
+            # Compute Overall row
+            overall_row = build_l1_overall_row(df, l1_scope, l1_mode, pvm)
+            if overall_row:
+                # Convert overall row to DataFrame and append
+                overall_df = pd.DataFrame([overall_row])
+                l1_full = pd.concat([l1_decomp, overall_df], ignore_index=True)
+            else:
+                l1_full = l1_decomp.copy()
+
+            # Format cells
+            def fmt_effect(v, mode_):
                 if pd.isna(v): return '—'
                 if mode_ == 'rp':
                     return fmt_rp(v)
@@ -1533,15 +1665,33 @@ if st.session_state.analysis is not None:
                 else:  # pp or pp_contrib
                     return f"{v:+.3f}pp"
 
-            display = l1_decomp.copy()
+            def fmt_context_left_right(v, col_name, mode_):
+                if pd.isna(v): return '—'
+                if col_name in ('GV Weight P1', 'GV Weight P2'):
+                    return f"{v*100:.2f}%"
+                elif col_name in ('GP P1', 'GP P2'):
+                    return fmt_rp(v)
+                else:  # Margin P1, Margin P2
+                    return f"{v:.2f}%"
+
+            display = l1_full.copy()
             for col in effect_cols:
                 if col in display.columns:
-                    display[col] = display[col].apply(lambda v: fmt_cell(v, l1_mode))
+                    display[col] = display[col].apply(lambda v: fmt_effect(v, l1_mode))
+            for col in left_context_cols + right_context_cols:
+                if col in display.columns:
+                    display[col] = display.apply(lambda r: fmt_context_left_right(r[col], col, l1_mode), axis=1)
 
-            # Gradient coloring on numeric values
+            # Reorder columns: L1 | BL | left_context | effects | right_context
+            ordered_cols = ['L1 Category', 'BL'] + left_context_cols + effect_cols + right_context_cols
+            display = display[[c for c in ordered_cols if c in display.columns]]
+
+            # Gradient coloring on numeric values (effects only)
             def style_l1_gradient(df_orig, df_disp):
                 num_cols = [c for c in effect_cols if c in df_orig.columns]
-                vals = df_orig[num_cols].values.flatten()
+                # Exclude Overall row from vmax calc to avoid scale issue
+                non_overall_mask = ~df_orig['L1 Category'].astype(str).str.startswith('OVERALL')
+                vals = df_orig.loc[non_overall_mask, num_cols].values.flatten()
                 vals = [v for v in vals if pd.notna(v)]
                 vmax = max(abs(v) for v in vals) if vals else 1
                 if vmax == 0: vmax = 1
@@ -1565,9 +1715,12 @@ if st.session_state.analysis is not None:
                     return ''
 
                 def apply_style(row):
+                    is_overall = str(df_orig.loc[row.name, 'L1 Category']).startswith('OVERALL')
                     styles = []
                     for col in df_disp.columns:
-                        if col in num_cols:
+                        if is_overall:
+                            styles.append('background-color: #DBEAFE; font-weight: 700;')
+                        elif col in num_cols:
                             val_num = df_orig.loc[row.name, col]
                             styles.append(color_cell(val_num))
                         else:
@@ -1582,25 +1735,47 @@ if st.session_state.analysis is not None:
                 'pp': 'Margin pp (within L1)',
                 'pp_contrib': f'Margin pp Contribution to {l1_scope}'
             }[l1_mode]
-            st.markdown(f"**Unit: {unit_label_l1} · Scope: {l1_scope}** · {len(display)} L1 categories")
+            n_l1 = len(l1_decomp)
+            st.markdown(f"**Unit: {unit_label_l1} · Scope: {l1_scope}** · {n_l1} L1 categories + Overall row")
 
             st.dataframe(
-                style_l1_gradient(l1_decomp, display),
-                use_container_width=True, hide_index=True, height=600
+                style_l1_gradient(l1_full, display),
+                use_container_width=True, hide_index=True, height=650
             )
 
+            # Footer caption with methodology note
             if l1_mode == 'pp_contrib':
-                total_within = (l1_decomp['Total Δ'] - l1_decomp['GV Weight Effect']).sum()
+                total_mc = l1_decomp['Margin Change Effect'].sum()
                 total_gv_wt = l1_decomp['GV Weight Effect'].sum()
                 total_combined = l1_decomp['Total Δ'].sum()
                 actual_scope_pp = pvm[l1_scope]['pp_total'] * 100
                 st.caption(
-                    f"💡 **Math identity:** Σ Within Effect ({total_within:+.3f}pp) + "
+                    f"💡 **Math identity (sum-able):** Σ Margin Change Effect ({total_mc:+.3f}pp) + "
                     f"Σ GV Weight Effect ({total_gv_wt:+.3f}pp) = "
                     f"**{total_combined:+.3f}pp** = scope {l1_scope} actual ΔMargin "
-                    f"(**{actual_scope_pp:+.3f}pp**). "
-                    f"Methodology: pp_L1 × GV_weight_P2_L1_in_scope (within) + "
-                    f"ΔWeight_L1 × Margin_P1_L1 (mix)."
+                    f"(**{actual_scope_pp:+.3f}pp**) ✓ exact match."
+                )
+            elif l1_mode == 'rp':
+                total_rp = l1_decomp['Total Δ'].sum()
+                actual_rp = pvm[l1_scope]['gp_end'] - pvm[l1_scope]['gp_start']
+                st.caption(
+                    f"💡 **Sum-able:** Σ L1 Rp ({fmt_rp(total_rp)}) = "
+                    f"scope {l1_scope} actual GP Δ ({fmt_rp(actual_rp)}) ✓ exact match. "
+                    f"Row Overall = Sum of all L1."
+                )
+            elif l1_mode == 'pct':
+                st.caption(
+                    f"⚠️ **Non-sum-able:** Growth % per L1 = Rp_diff / L1_GP_p1. "
+                    f"Sum of L1 growth ≠ Scope growth (denominator berbeda). "
+                    f"Row Overall = scope-level aggregate ({(pvm[l1_scope]['gp_end']-pvm[l1_scope]['gp_start'])/pvm[l1_scope]['gp_start']*100:+.2f}%), "
+                    f"dihitung fresh dari scope totals."
+                )
+            else:  # pp
+                st.caption(
+                    f"⚠️ **Non-sum-able:** Margin pp per L1 = m_end_L1 - m_base_L1. "
+                    f"Setiap L1 punya base margin berbeda, sum of pp tanpa weighting = meaningless. "
+                    f"Row Overall = scope-level aggregate margin change ({pvm[l1_scope]['pp_total']*100:+.3f}pp), "
+                    f"dihitung dari scope's aggregate margin (bukan sum of L1)."
                 )
 
     # ─────────────────────────────────────────────────────────────────────
