@@ -1,10 +1,11 @@
 """
-Query Builder — Page 4 (Astro Pricing Toolkit)
+Query Builder — Page 4 (Pricing Toolkit)
 Generate parameterized SQL queries for PVM and PI analysis.
 
-Author: Shadqi (Pricing Strategy Analyst, Astro)
+Author: Shadqi (Pricing Strategy Analyst)
 """
 import streamlit as st
+from brand import inject_brand, render_brand_header
 import datetime as dt
 import calendar
 import re
@@ -13,34 +14,13 @@ import re
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Query Builder — Astro Pricing",
+    page_title="Query Builder — Pricing",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="auto",
 )
 
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .section-header {
-        font-size: 22px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-    .info-box {
-        background: #DBEAFE;
-        border-left: 4px solid #2563EB;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin: 12px 0;
-        font-size: 13px;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUERY TEMPLATES (placeholders: __WEEKDAY__, __START_DATE__, __END_DATE__)
@@ -627,8 +607,7 @@ def render_query_builder(query_label, query_template, key_prefix):
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("🔍 Query Builder")
-st.caption("Generate parameterized SQL queries untuk BigQuery — Astro Pricing Strategy")
+render_brand_header("Query Builder", "Generate parameterized SQL queries untuk BigQuery")
 
 st.markdown("""
 **How to use:**
