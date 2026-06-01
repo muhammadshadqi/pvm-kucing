@@ -1,41 +1,21 @@
 """
-Glossary & Methodology — Page 5 (Astro Pricing Toolkit)
+Glossary & Methodology — Page 5 (Pricing Toolkit)
 Reference documentation for all definitions, methods, and tagging logic used
 in Page 1 (PVM Analyzer) and Page 2 (PI Analyzer).
 """
 import streamlit as st
+from brand import inject_brand, render_brand_header
 
 st.set_page_config(
-    page_title="Glossary — Astro Pricing",
+    page_title="Glossary — Pricing",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="auto",
 )
 
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .section-header {
-        font-size: 22px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-    .term-box {
-        background: #F9FAFB;
-        border-left: 3px solid #2563EB;
-        padding: 8px 14px;
-        border-radius: 4px;
-        margin: 6px 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
-st.title("📚 Glossary & Methodology")
-st.caption("Reference untuk semua definisi, threshold, dan metodologi yang dipakai di Page 1 (PVM) & Page 2 (PI)")
+render_brand_header("Glossary & Methodology", "Definisi, threshold, dan metodologi — Page 1 (PVM) & Page 2 (PI)")
 
 st.markdown("""
 Page ini bukan interactive dashboard — ini **referensi lengkap** untuk istilah, metode tagging,
@@ -63,15 +43,15 @@ st.markdown('<div class="section-header" id="konsep-dasar">1️⃣ Konsep Dasar<
 
 st.markdown("""
 ##### PI — Pricing Index
-**Definisi:** Rasio harga Astro vs harga competitor (blended). Formula:
+**Definisi:** Rasio harga vs harga competitor (blended). Formula:
 
-`PI = (Astro Selling Price / Blended Competitor Price) × 100`
+`PI = (Selling Price / Blended Competitor Price) × 100`
 
-- **PI = 100** → Astro sama mahalnya dengan competitor
-- **PI > 100** → Astro lebih mahal (Premium)
-- **PI < 100** → Astro lebih murah (Undercut)
+- **PI = 100** → kita sama mahalnya dengan competitor
+- **PI > 100** → kita lebih mahal (Premium)
+- **PI < 100** → kita lebih murah (Undercut)
 
-**Contoh:** Astro jual Rp 12,000, comp blended Rp 10,000 → PI = 120 (Astro 20% lebih mahal)
+**Contoh:** Kita jual Rp 12,000, comp blended Rp 10,000 → PI = 120 (20% lebih mahal dari comp)
 
 ---
 
@@ -96,15 +76,15 @@ GP%: relatif, independen volume.
 ---
 
 ##### COGS Index (CI)
-Rasio cost Astro vs comp price.
+Rasio cost vs comp price.
 
-`COGS Index = (Astro COGS / Blended Competitor Price) × 100`
+`COGS Index = (COGS / Blended Competitor Price) × 100`
 
-- **CI < 95** → cost Astro lebih murah dari comp price (cost advantage)
-- **CI = 100** → cost Astro = comp price
-- **CI > 105** → cost Astro lebih mahal dari comp price (structural loss risk)
+- **CI < 95** → cost lebih murah dari comp price (cost advantage)
+- **CI = 100** → cost = comp price
+- **CI > 105** → cost lebih mahal dari comp price (structural loss risk)
 
-**Why important:** CI tinggi = cost negotiation bottleneck. Bahkan kalau Astro jual sama dengan comp, margin akan tipis karena cost-nya sudah mahal.
+**Why important:** CI tinggi = cost negotiation bottleneck. Bahkan kalau jual sama dengan comp, margin akan tipis karena cost-nya sudah mahal.
 
 ---
 
@@ -128,7 +108,7 @@ st.markdown('<div class="section-header" id="tagging-threshold">2️⃣ Tagging 
 
 st.markdown("""
 ##### Direction Tag (Up / Stay / Down)
-Dipakai untuk classify pergerakan **Price** (Astro), **COGS**, dan **Comp Price** dari P1 ke P2.
+Dipakai untuk classify pergerakan **Price** (kita), **COGS**, dan **Comp Price** dari P1 ke P2.
 
 | Tag | Kondisi |
 |---|---|
@@ -175,8 +155,8 @@ Klasifikasi sumber produk:
 
 | Status | Arti |
 |---|---|
-| **SOURCE** | SKU yang Astro sumber langsung (typical 75% dari portfolio) |
-| **NON SOURCE** | SKU yang Astro gak sumber langsung |
+| **SOURCE** | SKU yang kita sumber langsung (typical 75% dari portfolio) |
+| **NON SOURCE** | SKU yang kita gak sumber langsung |
 
 PI analysis di engine pakai filter `source_status = 'SOURCE'` untuk consistency.
 """)
@@ -265,7 +245,7 @@ hitung Price vs Comp vs Churned, total effect-nya sama.
 
 **Granularity:**
 - `eff_dep` (Churned) — pengaruh SKU yang ada di P1 tapi hilang di P2
-- `eff_price` — pengaruh perubahan price Astro
+- `eff_price` — pengaruh perubahan price
 - `eff_normal_comp` — pengaruh perubahan **normal price** competitor (without promo)
 - `eff_discount_comp` — pengaruh perubahan **blended price** competitor minus normal effect (= efek dari promo)
 - `eff_new` — pengaruh SKU baru di P2
