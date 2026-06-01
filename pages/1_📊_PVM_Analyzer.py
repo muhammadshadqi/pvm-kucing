@@ -2,13 +2,14 @@
 PVM Analyzer — Streamlit Web App (Page 1)
 Pricing × Volume × Mix decomposition for week/month-over-week pricing analysis.
 
-Author: Shadqi (Pricing Strategy Analyst, Astro)
+Author: Shadqi (Pricing Strategy Analyst)
 """
 import io
 import os
 import sys
 import math
 import streamlit as st
+from brand import inject_brand, render_brand_header
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -25,7 +26,7 @@ from dummy_data import dummy_pvm_bytes
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PVM Analyzer — Astro Pricing",
+    page_title="PVM Analyzer — Pricing",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="auto",
@@ -53,65 +54,7 @@ def cached_pvm_excel_bytes(file_bytes, file_name):
     return pvm_generate_excel(result)
 
 # Custom CSS — minimal, focused on KPI cards & banner
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .kpi-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 10px;
-        padding: 16px 20px;
-        background: #FFFFFF;
-        height: 100%;
-    }
-    .kpi-label { font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-    .kpi-value { font-size: 28px; font-weight: 700; color: #111827; margin: 4px 0; }
-    .kpi-delta-pos { font-size: 14px; color: #059669; font-weight: 600; }
-    .kpi-delta-neg { font-size: 14px; color: #DC2626; font-weight: 600; }
-    .kpi-delta-neu { font-size: 14px; color: #6B7280; font-weight: 600; }
-    .kpi-sub { font-size: 11px; color: #9CA3AF; margin-top: 4px; }
-
-    .banner-warn {
-        background: #FEF3C7;
-        border-left: 4px solid #F59E0B;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .banner-ok {
-        background: #D1FAE5;
-        border-left: 4px solid #10B981;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .banner-title { font-weight: 700; margin-bottom: 4px; }
-
-    .section-header {
-        font-size: 18px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 24px;
-        margin-bottom: 8px;
-        padding-bottom: 4px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-    .section-sub { font-size: 13px; color: #6B7280; margin-bottom: 12px; }
-
-    .mover-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 8px 12px;
-        margin-bottom: 6px;
-        background: #FFFFFF;
-        font-size: 12px;
-    }
-    .mover-rank { font-weight: 700; color: #6B7280; }
-    .mover-name { font-weight: 600; color: #111827; }
-    .mover-gain { color: #059669; font-weight: 600; }
-    .mover-loss { color: #DC2626; font-weight: 600; }
-    .mover-meta { color: #6B7280; font-size: 11px; }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -974,8 +917,7 @@ if st.session_state.pvm_analysis is None:
 # ─────────────────────────────────────────────────────────────────────────────
 col_title, col_clear = st.columns([5, 1])
 with col_title:
-    st.title("📊 PVM Analyzer")
-    st.caption("Pricing × Volume × Mix Decomposition — Astro Pricing Strategy")
+    render_brand_header("PVM Analyzer", "Pricing × Volume × Mix Decomposition")
 with col_clear:
     st.write("")
     if st.session_state.pvm_analysis is not None and not st.session_state.pvm_is_dummy:
@@ -995,7 +937,7 @@ if st.session_state.pvm_is_dummy:
     st.info(
         "ℹ️ **Demo mode** — saat ini menampilkan **dummy data** (600 SKU random fictional). "
         "Upload file Excel/CSV lo di bawah untuk replace dengan data asli. "
-        "Semua product ID, nama, dan metrik di sini bukan data Astro production."
+        "Semua product ID, nama, dan metrik di sini bukan data production."
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
