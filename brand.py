@@ -229,21 +229,18 @@ def logo_svg(size: int = 38) -> str:
     """
     g900 = COLORS["green_900"]; g700 = COLORS["green_700"]; gold = COLORS["gold_500"]
     cream = COLORS["cream_50"]
-    return f"""
-<svg width="{size}" height="{size}" viewBox="0 0 48 48" fill="none"
-     xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pricing Toolkit logo">
-  <circle cx="24" cy="24" r="22" fill="{g900}"/>
-  <circle cx="24" cy="24" r="22" fill="none" stroke="{gold}" stroke-width="1.2" opacity="0.5"/>
-  <!-- upward chart line -->
-  <path d="M13 31 L21 24 L27 28 L36 16" stroke="{cream}" stroke-width="2.4"
-        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <!-- apex node (the 'star') -->
-  <circle cx="36" cy="16" r="3.4" fill="{gold}"/>
-  <circle cx="36" cy="16" r="3.4" fill="none" stroke="{cream}" stroke-width="1"/>
-  <!-- baseline ticks -->
-  <path d="M13 35 L36 35" stroke="{g700}" stroke-width="1.4" opacity="0.6"/>
-</svg>
-"""
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 48 48" fill="none" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pricing Toolkit logo">'
+        f'<circle cx="24" cy="24" r="22" fill="{g900}"/>'
+        f'<circle cx="24" cy="24" r="22" fill="none" stroke="{gold}" stroke-width="1.2" opacity="0.5"/>'
+        f'<path d="M13 31 L21 24 L27 28 L36 16" stroke="{cream}" stroke-width="2.4" '
+        f'stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+        f'<circle cx="36" cy="16" r="3.4" fill="{gold}"/>'
+        f'<circle cx="36" cy="16" r="3.4" fill="none" stroke="{cream}" stroke-width="1"/>'
+        f'<path d="M13 35 L36 35" stroke="{g700}" stroke-width="1.4" opacity="0.6"/>'
+        f'</svg>'
+    )
 
 
 def inject_brand():
@@ -254,16 +251,15 @@ def inject_brand():
 def render_brand_header(page_title: str, page_subtitle: str = ""):
     """Render the logo + wordmark bar, then the page title block."""
     sub_html = f'<div class="page-subtitle">{page_subtitle}</div>' if page_subtitle else ""
-    st.markdown(
-        f"""
-        <div class="brand-bar">
-            {logo_svg(38)}
-            <div class="brand-wordmark">Pricing Toolkit
-                <span class="sub">Pricing Strategy</span>
-            </div>
-        </div>
-        <div class="page-title">{page_title}</div>
-        {sub_html}
-        """,
-        unsafe_allow_html=True,
+    logo = logo_svg(38).strip()
+    html = (
+        '<div class="brand-bar">'
+        f'{logo}'
+        '<div class="brand-wordmark">Pricing Toolkit'
+        '<span class="sub">Pricing Strategy</span>'
+        '</div>'
+        '</div>'
+        f'<div class="page-title">{page_title}</div>'
+        f'{sub_html}'
     )
+    st.markdown(html, unsafe_allow_html=True)
