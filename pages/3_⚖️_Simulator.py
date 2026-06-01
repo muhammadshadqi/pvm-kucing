@@ -517,10 +517,6 @@ if st.session_state.sim_result is not None:
     R = st.session_state.sim_result
     df = R['df_sim']
     summary = R['summary']
-    by_bl = R['by_bl']
-    by_l1 = R['by_l1']
-    pi_dist = R['pi_distribution']
-    flags = R['framework_flags']
     scenarios = R['scenarios']
     variant_cols = R['variant_cols']
 
@@ -588,9 +584,9 @@ if st.session_state.sim_result is not None:
 
         lens_options = ["🏢 Overall Astro"]
         if not l1_touched.empty:
-            lens_options.append(f"🗂️ L1 Category ({len(l1_touched)} terdampak)")
+            lens_options.append(f"🗂️ L1 Category ({len(l1_touched)})")
         if not bl_touched.empty:
-            lens_options.append(f"🧱 Pricing BL ({len(bl_touched)} terdampak)")
+            lens_options.append(f"🧱 Pricing BL ({len(bl_touched)})")
         lens_options.append(f"🎯 SKU Diubah ({n_changed})")
 
         st.markdown("##### 🔭 Pilih Lensa")
@@ -706,158 +702,85 @@ if st.session_state.sim_result is not None:
 
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 3 — PER-SKU DETAIL TABLE
+    # ZONE 3 — PER-SKU DETAIL (Baseline vs each variant)
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">4️⃣ Per-SKU Detail</div>', unsafe_allow_html=True)
-    st.caption("Detail per SKU dengan harga, GP, margin, dan 3 versi PI per scenario. Klik header kolom untuk sort.")
+    st.caption("Per SKU yang diubah: Baseline vs tiap variant, lengkap dengan perubahan "
+               "GV, GP, GP%, PI Avg, dan PI Last. Satu tabel per variant. Klik header kolom untuk sort.")
 
-    # Build display table — limit columns to readable subset
-    info_cols = ['product_id', 'product_name', 'l1_category_name', 'pricing_bl_25',
-                 'qty', 'cost_price', 'avg_comp_price', 'last_comp_price', 'last_price']
-    price_cols = scenarios  # baseline + var_1, var_2, ...
-    gp_pct_cols = [f'gp_pct_{s}' for s in scenarios]
-    pi_avg_cols = [f'pi_avg_{s}' for s in scenarios]
-    pi_last_cols = [f'pi_last_{s}' for s in scenarios]
-    delta_gp_cols = [f'd_gp_{v}' for v in variant_cols]
-    delta_pi_cols = [f'd_pi_avg_{v}' for v in variant_cols]
+    def _color_delta(val):
+        if isinstance(val, (int, float)) and not pd.isna(val):
+            if val > 0: return 'color: #16a34a'
+            if val < 0: return 'color: #dc2626'
+        return ''
 
-    display_cols = info_cols + price_cols + gp_pct_cols + pi_avg_cols + pi_last_cols + \
-                   ['pi_last_with_lp'] + delta_gp_cols + delta_pi_cols
+    for v in variant_cols:
+        st.markdown(f"**📋 Baseline vs `{v}`**")
 
-    display_cols = [c for c in display_cols if c in df.columns]
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                'Product ID':   r['product_id'],
+                'Product':      str(r['product_name'])[:45],
+                'BL':           r.get('pricing_bl_25', '—'),
+                'Qty':          r['qty'],
+                # Price
+                'Harga Base':   r['baseline'],
+                f'Harga {v}':   r[v],
+                # GV
+                'GV Base':      r['gv_baseline'],
+                f'GV {v}':      r[f'gv_{v}'],
+                'Δ GV':         r[f'gv_{v}'] - r['gv_baseline'],
+                'Δ GV%':        ((r[f'gv_{v}'] - r['gv_baseline']) / r['gv_baseline']
+                                 if r['gv_baseline'] else np.nan),
+                # GP
+                'GP Base':      r['gp_baseline'],
+                f'GP {v}':      r[f'gp_{v}'],
+                'Δ GP':         r[f'gp_{v}'] - r['gp_baseline'],
+                'Δ GP%':        ((r[f'gp_{v}'] - r['gp_baseline']) / r['gp_baseline']
+                                 if r['gp_baseline'] else np.nan),
+                # GP% (margin)
+                'GP% Base':     r['gp_pct_baseline'],
+                f'GP% {v}':     r[f'gp_pct_{v}'],
+                'Δ GP% (pp)':   r[f'gp_pct_{v}'] - r['gp_pct_baseline'],
+                # PI Avg
+                'PI Avg Base':  r['pi_avg_baseline'],
+                f'PI Avg {v}':  r[f'pi_avg_{v}'],
+                'Δ PI Avg':     r[f'pi_avg_{v}'] - r['pi_avg_baseline'],
+                # PI Last
+                'PI Last Base': r['pi_last_baseline'],
+                f'PI Last {v}': r[f'pi_last_{v}'],
+                'Δ PI Last':    r[f'pi_last_{v}'] - r['pi_last_baseline'],
+            })
+        comp = pd.DataFrame(rows)
 
-    # View toggle
-    detail_view = st.radio("View:", ["Compact (key cols only)", "Wide (all scenarios)"],
-                           horizontal=True, key='sim_detail_view')
+        fmt = {
+            'Qty': '{:,.0f}',
+            'Harga Base': '{:,.0f}', f'Harga {v}': '{:,.0f}',
+            'GV Base': '{:,.0f}', f'GV {v}': '{:,.0f}', 'Δ GV': '{:+,.0f}', 'Δ GV%': '{:+.1%}',
+            'GP Base': '{:,.0f}', f'GP {v}': '{:,.0f}', 'Δ GP': '{:+,.0f}', 'Δ GP%': '{:+.1%}',
+            'GP% Base': '{:.1%}', f'GP% {v}': '{:.1%}', 'Δ GP% (pp)': '{:+.2%}',
+            'PI Avg Base': '{:.3f}', f'PI Avg {v}': '{:.3f}', 'Δ PI Avg': '{:+.3f}',
+            'PI Last Base': '{:.3f}', f'PI Last {v}': '{:.3f}', 'Δ PI Last': '{:+.3f}',
+        }
+        delta_cols = ['Δ GV', 'Δ GV%', 'Δ GP', 'Δ GP%', 'Δ GP% (pp)', 'Δ PI Avg', 'Δ PI Last']
+        delta_cols = [c for c in delta_cols if c in comp.columns]
 
-    if detail_view == "Compact (key cols only)":
-        # Show only: info + baseline price + each variant price + d_gp + d_pi_avg
-        compact_cols = ['product_id', 'product_name', 'pricing_bl_25',
-                       'qty', 'cost_price', 'avg_comp_price',
-                       'baseline', 'gp_baseline', 'gp_pct_baseline',
-                       'pi_avg_baseline', 'pi_last_baseline', 'pi_last_with_lp']
-        for v in variant_cols:
-            compact_cols += [v, f'gp_{v}', f'pi_avg_{v}', f'd_gp_{v}', f'd_pi_avg_{v}']
-        show = df[[c for c in compact_cols if c in df.columns]].copy()
-    else:
-        show = df[display_cols].copy()
-
-    # Format display
-    fmt_dict = {}
-    for c in show.columns:
-        if c in ('qty', 'cost_price', 'avg_comp_price', 'last_comp_price', 'last_price'):
-            fmt_dict[c] = '{:,.0f}'
-        elif c == 'baseline' or c.startswith('var_'):
-            fmt_dict[c] = '{:,.0f}'
-        elif c.startswith('gv_') or c.startswith('gp_') and not c.startswith('gp_pct'):
-            fmt_dict[c] = '{:,.0f}'
-        elif c.startswith('gp_pct'):
-            fmt_dict[c] = '{:.1%}'
-        elif c.startswith('pi_avg') or c.startswith('pi_last') or c == 'pi_last_with_lp':
-            fmt_dict[c] = '{:.3f}'
-        elif c.startswith('d_gp_pct') or c.startswith('d_gp_pp'):
-            fmt_dict[c] = '{:+.2%}'
-        elif c.startswith('d_pi'):
-            fmt_dict[c] = '{:+.3f}'
-        elif c.startswith('d_'):
-            fmt_dict[c] = '{:+,.0f}'
-
-    st.dataframe(
-        show.style.format(fmt_dict, na_rep='—'),
-        use_container_width=True, hide_index=True, height=500
-    )
-
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 4 — BY DIMENSION
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">5️⃣ Aggregated by Dimension</div>', unsafe_allow_html=True)
-
-    dim_tabs = st.tabs(["By Business Line", "By L1 Category", "By L2 Category"])
-
-    with dim_tabs[0]:
-        if not by_bl.empty:
-            cols_show = ['pricing_bl_25', 'n_sku']
-            for s in scenarios:
-                cols_show += [f'gv_{s}', f'gp_{s}', f'gp_pct_{s}', f'pi_avg_{s}']
-            for v in variant_cols:
-                cols_show += [f'd_gp_{v}', f'd_pi_avg_{v}']
-            cols_show = [c for c in cols_show if c in by_bl.columns]
-
-            fmt = {}
-            for c in cols_show:
-                if 'gp_pct' in c:
-                    fmt[c] = '{:.1%}'
-                elif 'pi_' in c and 'd_' not in c:
-                    fmt[c] = '{:.3f}'
-                elif 'd_pi' in c:
-                    fmt[c] = '{:+.3f}'
-                elif 'd_' in c:
-                    fmt[c] = '{:+,.0f}'
-                elif c == 'n_sku':
-                    fmt[c] = '{:,}'
-                elif c.startswith('gv_') or c.startswith('gp_'):
-                    fmt[c] = '{:,.0f}'
-
-            st.dataframe(by_bl[cols_show].style.format(fmt, na_rep='—'),
-                         use_container_width=True, hide_index=True)
-        else:
-            st.info("Tidak ada data per BL")
-
-    with dim_tabs[1]:
-        if not by_l1.empty:
-            cols_show = ['l1_category_name', 'n_sku']
-            for s in scenarios:
-                cols_show += [f'gv_{s}', f'gp_{s}', f'gp_pct_{s}', f'pi_avg_{s}']
-            for v in variant_cols:
-                cols_show += [f'd_gp_{v}', f'd_pi_avg_{v}']
-            cols_show = [c for c in cols_show if c in by_l1.columns]
-
-            fmt = {}
-            for c in cols_show:
-                if 'gp_pct' in c: fmt[c] = '{:.1%}'
-                elif 'pi_' in c and 'd_' not in c: fmt[c] = '{:.3f}'
-                elif 'd_pi' in c: fmt[c] = '{:+.3f}'
-                elif 'd_' in c: fmt[c] = '{:+,.0f}'
-                elif c == 'n_sku': fmt[c] = '{:,}'
-                elif c.startswith('gv_') or c.startswith('gp_'): fmt[c] = '{:,.0f}'
-
-            st.dataframe(by_l1[cols_show].style.format(fmt, na_rep='—'),
-                         use_container_width=True, hide_index=True, height=400)
-        else:
-            st.info("Tidak ada data per L1")
-
-    with dim_tabs[2]:
-        by_l2 = R.get('by_l2', pd.DataFrame())
-        if not by_l2.empty:
-            cols_show = ['l2_category_name', 'n_sku']
-            for s in scenarios:
-                cols_show += [f'gv_{s}', f'gp_{s}', f'gp_pct_{s}', f'pi_avg_{s}']
-            for v in variant_cols:
-                cols_show += [f'd_gp_{v}', f'd_pi_avg_{v}']
-            cols_show = [c for c in cols_show if c in by_l2.columns]
-
-            fmt = {}
-            for c in cols_show:
-                if 'gp_pct' in c: fmt[c] = '{:.1%}'
-                elif 'pi_' in c and 'd_' not in c: fmt[c] = '{:.3f}'
-                elif 'd_pi' in c: fmt[c] = '{:+.3f}'
-                elif 'd_' in c: fmt[c] = '{:+,.0f}'
-                elif c == 'n_sku': fmt[c] = '{:,}'
-                elif c.startswith('gv_') or c.startswith('gp_'): fmt[c] = '{:,.0f}'
-
-            st.dataframe(by_l2[cols_show].style.format(fmt, na_rep='—'),
-                         use_container_width=True, hide_index=True, height=400)
-        else:
-            st.info("Tidak ada data per L2")
+        st.dataframe(
+            comp.style.format(fmt, na_rep='—').map(_color_delta, subset=delta_cols),
+            use_container_width=True, hide_index=True, height=min(60 + 35 * len(comp), 460)
+        )
+        st.caption("Δ PI negatif = harga turun relatif kompetitor = lebih kompetitif. "
+                   "Δ GP% (pp) = perubahan margin dalam poin persentase.")
+        st.markdown("")
 
 
     # ─────────────────────────────────────────────────────────────────────────
     # ZONE 5 — SCENARIO COMPARISON CHARTS
     # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">6️⃣ Scenario Comparison Charts</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">5️⃣ Scenario Comparison Charts</div>', unsafe_allow_html=True)
 
-    chart_tab = st.tabs(["GP per Scenario", "Top Movers (Δ GP)", "PI vs Margin"])
+    chart_tab = st.tabs(["GP per Scenario", "Top Movers (Δ GP)"])
 
     with chart_tab[0]:
         # Bar chart
@@ -908,82 +831,12 @@ if st.session_state.sim_result is not None:
                 fig_l.update_layout(height=500, margin=dict(l=200), xaxis_title="Δ GP (Rp)")
                 st.plotly_chart(fig_l, use_container_width=True)
 
-    with chart_tab[2]:
-        # Scatter PI vs Margin
-        scn_pick = st.selectbox("Pilih scenario:", scenarios, key='sim_scatter_scn')
-        scatter_df = df[[f'pi_avg_{scn_pick}', f'gp_pct_{scn_pick}', 'product_name', 'pricing_bl_25', 'qty']].copy()
-        scatter_df = scatter_df.dropna(subset=[f'pi_avg_{scn_pick}', f'gp_pct_{scn_pick}'])
-
-        fig_sc = px.scatter(
-            scatter_df, x=f'pi_avg_{scn_pick}', y=f'gp_pct_{scn_pick}',
-            color='pricing_bl_25', size='qty',
-            hover_data=['product_name'],
-            title=f"PI vs Margin — Scenario {scn_pick}",
-            labels={f'pi_avg_{scn_pick}': 'PI Avg Comp', f'gp_pct_{scn_pick}': 'Margin %'}
-        )
-        fig_sc.add_hline(y=0, line_dash="dash", line_color="grey")
-        fig_sc.add_vline(x=100, line_dash="dash", line_color="grey")
-        fig_sc.update_layout(height=550)
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 6 — PI DISTRIBUTION
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">7️⃣ PI Distribution per Scenario</div>', unsafe_allow_html=True)
-    st.caption("Berapa SKU di bucket PI mana per scenario. Pakai PI Avg Comp sebagai basis.")
-
-    # Show distribution table + chart
-    dist_show = pi_dist.copy()
-    dist_show.index = dist_show['scenario']
-    dist_chart_df = dist_show.drop(columns=['scenario', 'total'])
-
-    pi_col1, pi_col2 = st.columns([2, 3])
-    with pi_col1:
-        st.markdown("**SKU Count per Bucket**")
-        st.dataframe(pi_dist, use_container_width=True, hide_index=True)
-
-    with pi_col2:
-        # Stacked bar
-        fig_pi = go.Figure()
-        bucket_colors = {
-            'A.<95':      '#10B981',  # green - kompetitif
-            'B.95-<100':  '#84CC16',
-            'C.100-105':  '#FACC15',
-            'D.105-110':  '#FB923C',
-            'E.110-120':  '#F87171',
-            'F.>120':     '#DC2626',  # red - premium
-        }
-        for bucket in ['A.<95', 'B.95-<100', 'C.100-105', 'D.105-110', 'E.110-120', 'F.>120']:
-            if bucket in dist_chart_df.columns:
-                fig_pi.add_trace(go.Bar(
-                    name=bucket, x=dist_chart_df.index, y=dist_chart_df[bucket],
-                    marker_color=bucket_colors[bucket]
-                ))
-        fig_pi.update_layout(
-            barmode='stack', height=400,
-            xaxis_title="Scenario", yaxis_title="# SKU",
-            title="PI Bucket Distribution per Scenario"
-        )
-        st.plotly_chart(fig_pi, use_container_width=True)
-
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 7 — FRAMEWORK FLAGS
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">8️⃣ Framework Flags per Scenario</div>', unsafe_allow_html=True)
-    st.caption("SKU yang trigger framework rule (butuh repricing action) di setiap scenario. "
-              "Lihat Page 5 Glossary untuk detail rule.")
-
-    flags_show = flags.copy()
-    flags_show.columns = [c.replace('_', ' ').title() for c in flags_show.columns]
-    st.dataframe(flags_show, use_container_width=True, hide_index=True)
 
 
     # ─────────────────────────────────────────────────────────────────────────
     # ZONE 8 — DOWNLOAD EXCEL
     # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">9️⃣ Download Full Report</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">6️⃣ Download Full Report</div>', unsafe_allow_html=True)
     st.caption("Excel 8 sheets: Master Data, SKU Detail (wide pivot), Summary KPI, By BL, By L1, "
               "PI Distribution, Framework Flags, Glossary.")
 
