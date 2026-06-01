@@ -1,17 +1,18 @@
 """
-Price Simulator — Page 3 (Astro Pricing Toolkit)
+Price Simulator — Page 3 (Pricing Toolkit)
 Simulate price scenario impact on GV, GP, Margin, and PI per SKU.
 
 Two scenario sources supported:
 1. Upload File 2 (standard format: product_id, baseline, var_1, var_2, ...)
 2. Manual builder (search SKU, multi-select, dynamic variants)
 
-Author: Shadqi (Pricing Strategy Analyst, Astro)
+Author: Shadqi (Pricing Strategy Analyst)
 """
 import io
 import os
 import sys
 import streamlit as st
+from brand import inject_brand, render_brand_header
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -31,58 +32,13 @@ from simulator import (compute as sim_compute, generate_excel as sim_generate_ex
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Price Simulator — Astro Pricing",
+    page_title="Price Simulator — Pricing",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="auto",
 )
 
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .section-header {
-        font-size: 22px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-    .kpi-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 10px;
-        padding: 14px;
-        background: #FFFFFF;
-        margin-bottom: 8px;
-    }
-    .kpi-card-label {
-        font-size: 11px;
-        color: #6B7280;
-        font-weight: 700;
-        text-transform: uppercase;
-        margin-bottom: 4px;
-    }
-    .kpi-card-value {
-        font-size: 24px;
-        font-weight: 800;
-        color: #111827;
-    }
-    .kpi-card-delta {
-        font-size: 12px;
-        font-weight: 600;
-        margin-top: 2px;
-    }
-    .kpi-card-sub {
-        font-size: 11px;
-        color: #6B7280;
-        margin-top: 2px;
-    }
-    .delta-pos { color: #16A34A; }
-    .delta-neg { color: #DC2626; }
-    .delta-neu { color: #6B7280; }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,8 +186,7 @@ if 'sim_overall' not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────────
 col_title, col_clear = st.columns([5, 1])
 with col_title:
-    st.title("⚖️ Price Simulator")
-    st.caption("What-if Price Scenarios — Astro Pricing Strategy")
+    render_brand_header("Price Simulator", "What-if Price Scenarios")
 with col_clear:
     st.write("")
     if st.session_state.sim_result is not None:
@@ -582,7 +537,7 @@ if st.session_state.sim_result is not None:
         bl_touched = by_bl_o[by_bl_o['n_sku_changed'] > 0] if not by_bl_o.empty else pd.DataFrame()
         l1_touched = by_l1_o[by_l1_o['n_sku_changed'] > 0] if not by_l1_o.empty else pd.DataFrame()
 
-        lens_options = ["🏢 Overall Astro"]
+        lens_options = ["🏢 Overall"]
         if not l1_touched.empty:
             lens_options.append(f"🗂️ L1 Category ({len(l1_touched)})")
         if not bl_touched.empty:
@@ -615,7 +570,7 @@ if st.session_state.sim_result is not None:
                 d_gv, d_gp = ov_v['gv'] - ov_base['gv'], ov_v['gp'] - ov_base['gp']
                 d_gp_pct = ov_v['gp_pct'] - ov_base['gp_pct']
                 share_gp = d_gp / ov_base['gp'] if ov_base['gp'] else np.nan
-                st.markdown(f"**↓ Impact `{v}` ke Overall Astro**")
+                st.markdown(f"**↓ Impact `{v}` ke Overall**")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     st.markdown(kpi_card(f"Overall GV — {v}", fmt_money(ov_v['gv']),
@@ -629,7 +584,7 @@ if st.session_state.sim_result is not None:
                 with c4:
                     st.markdown(kpi_card(f"Δ GP share — {v}",
                                           fmt_pct(share_gp) if pd.notna(share_gp) else "—",
-                                          sub="Δ GP ÷ GP Astro baseline"), unsafe_allow_html=True)
+                                          sub="Δ GP ÷ GP baseline"), unsafe_allow_html=True)
 
         # ═══════════════════ LENS: L1 CATEGORY (pair tables) ══════════════════
         elif lens.startswith("🗂️"):
