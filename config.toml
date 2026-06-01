@@ -1,0 +1,12 @@
+[theme]
+# Astro Pricing Toolkit — "Classic Premium" theme
+# Deep green + cream, earthy & professional.
+primaryColor = "#1F4D3A"           # deep forest green (accent, buttons, active)
+backgroundColor = "#FBF8F1"        # warm cream (main canvas)
+secondaryBackgroundColor = "#F3EDE0"  # slightly deeper cream (sidebar, cards bg)
+textColor = "#22291F"              # near-black with warm tint
+font = "serif"
+
+[server]
+# Keep uploads in-memory; nothing persisted server-side.
+maxUploadSize = 50
