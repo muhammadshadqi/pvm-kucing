@@ -218,6 +218,8 @@ if 'sim_manual_scenarios' not in st.session_state:
     st.session_state.sim_manual_scenarios = {}
 if 'sim_manual_variant_count' not in st.session_state:
     st.session_state.sim_manual_variant_count = 2
+if 'sim_loaded_file2_name' not in st.session_state:
+    st.session_state.sim_loaded_file2_name = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,214 +301,207 @@ if df_master is not None:
     st.markdown('<div class="section-header">2️⃣ Build Scenario (File 2 atau Manual Builder)</div>',
                 unsafe_allow_html=True)
 
-    scenario_mode = st.radio(
-        "Pilih cara input scenario:",
-        ['📂 Upload File 2', '✏️ Manual Builder'],
-        horizontal=True,
-        key='sim_scenario_mode'
+    st.caption(
+        "Upload File 2 sebagai titik awal (opsional), atau langsung cari & tambah SKU manual. "
+        "Semua harga — baseline & variant — tetap bisa lo edit di tabel. "
+        "Begitu lo ubah angka, hasil di bawah otomatis ke-update."
     )
 
-    df_scenario = None
+    # Helper: ensure product_id as clean string for fast lookup
+    df_master = df_master.copy()
+    df_master['product_id'] = df_master['product_id'].astype(str).str.strip()
 
-    # ── MODE A: Upload File 2 ──
-    if scenario_mode == '📂 Upload File 2':
+    # ── OPTIONAL: Upload File 2 to seed the editor ──
+    with st.expander("📂 (Opsional) Upload File 2 untuk isi awal", expanded=False):
         uploaded_scenario = st.file_uploader(
             "File 2 — Scenario (product_id, baseline, var_1, var_2, ...)",
             type=['xlsx', 'xls', 'csv'],
-            help="Kolom: product_id (wajib), baseline (wajib), var_1, var_2, ... (variants opsional, tanpa limit)",
+            help="Kolom: product_id (wajib), baseline (wajib), var_1, var_2, ... (opsional). "
+                 "Setelah di-load, semua nilai tetap bisa lo edit di tabel bawah.",
             key='sim_scenario_upload'
         )
-        if uploaded_scenario is not None:
+        if uploaded_scenario is not None and uploaded_scenario.name != st.session_state.get('sim_loaded_file2_name'):
             try:
                 scenario_bytes = uploaded_scenario.getvalue()
                 if uploaded_scenario.name.lower().endswith('.csv'):
-                    df_scenario = pd.read_csv(io.BytesIO(scenario_bytes))
+                    df_f2 = pd.read_csv(io.BytesIO(scenario_bytes))
                 else:
-                    df_scenario = pd.read_excel(io.BytesIO(scenario_bytes))
-                # Normalize: rename first col to product_id, second to baseline, rest to var_N
-                cols_in = list(df_scenario.columns)
-                n_cols = len(cols_in)
+                    df_f2 = pd.read_excel(io.BytesIO(scenario_bytes))
+
+                n_cols = len(df_f2.columns)
                 if n_cols < 2:
                     st.error("❌ File 2 minimal 2 kolom (product_id + baseline)")
-                    st.stop()
-                new_cols = ['product_id', 'baseline'] + [f'var_{i}' for i in range(1, n_cols - 1)]
-                df_scenario.columns = new_cols
+                else:
+                    new_cols = ['product_id', 'baseline'] + [f'var_{i}' for i in range(1, n_cols - 1)]
+                    df_f2.columns = new_cols
+                    df_f2['product_id'] = df_f2['product_id'].astype(str).str.strip()
 
-                st.session_state.sim_scenario_bytes = scenario_bytes
-                st.session_state.sim_scenario_name = uploaded_scenario.name
+                    f2_var_cols = [c for c in df_f2.columns if c.startswith('var_')]
+                    # Bump variant count to fit File 2
+                    if f2_var_cols:
+                        max_var = max(int(c.split('_')[1]) for c in f2_var_cols)
+                        st.session_state.sim_manual_variant_count = max(
+                            st.session_state.sim_manual_variant_count, max_var)
 
-                vcols = [c for c in df_scenario.columns if c.startswith('var_')]
-                st.success(f"✅ {len(df_scenario)} SKU · {len(vcols)} variants ({', '.join(vcols)})")
+                    # Merge File 2 rows into the editable scenario state
+                    master_pids = set(df_master['product_id'].values)
+                    seeded = 0
+                    for _, r in df_f2.iterrows():
+                        pid = str(r['product_id'])
+                        if pid not in master_pids:
+                            continue  # skip SKU yang nggak ada di master
+                        entry = {'baseline': r['baseline']}
+                        for vc in f2_var_cols:
+                            if pd.notna(r[vc]):
+                                entry[vc] = r[vc]
+                        st.session_state.sim_manual_scenarios[pid] = entry
+                        seeded += 1
 
-                with st.expander("👀 Preview scenario file", expanded=False):
-                    st.dataframe(df_scenario.head(10), use_container_width=True)
+                    st.session_state.sim_loaded_file2_name = uploaded_scenario.name
+                    st.success(f"✅ {seeded} SKU dari File 2 dimuat ke editor. Lo bisa edit / tambah SKU di bawah.")
+                    st.rerun()
             except Exception as e:
                 st.error(f"❌ Gagal load File 2: {e}")
 
-    # ── MODE B: Manual Builder ──
-    else:  # Manual Builder
-        st.markdown("##### 🔍 Cari & Pilih SKU")
+    # ── SEARCH & ADD SKU (autocomplete via multiselect) ──
+    st.markdown("##### 🔍 Cari & Tambah SKU")
 
-        # SKU search
-        search_query = st.text_input(
-            "Cari berdasarkan product_id atau product_name:",
-            placeholder="ketik nama produk atau ID...",
-            key='sim_search'
+    # Build option labels for ALL master SKU (multiselect has built-in type-to-filter)
+    opt_label_to_pid = {
+        f"{row['product_id']} — {str(row['product_name'])[:60]} (Rp {row['selling_price']:,.0f})": row['product_id']
+        for _, row in df_master.iterrows()
+    }
+    pid_to_label = {v: k for k, v in opt_label_to_pid.items()}
+
+    # Pre-select labels for SKU already in scenario state (incl. those from File 2)
+    existing_pids = [p for p in st.session_state.sim_manual_scenarios.keys()
+                     if p in pid_to_label]
+    default_labels = [pid_to_label[p] for p in existing_pids]
+
+    selected_labels = st.multiselect(
+        "Ketik product_id atau nama produk — opsi cocok muncul otomatis, lalu pilih:",
+        options=list(opt_label_to_pid.keys()),
+        default=default_labels,
+        key='sim_multiselect',
+        help="Ketik sebagian ID / nama → opsi yang cocok langsung muncul. Bisa pilih banyak SKU."
+    )
+    selected_pids = [str(opt_label_to_pid[lbl]) for lbl in selected_labels]
+
+    # Drop deselected SKU from scenario state
+    for pid in list(st.session_state.sim_manual_scenarios.keys()):
+        if pid not in selected_pids:
+            del st.session_state.sim_manual_scenarios[pid]
+
+    # ── VARIANT COUNT ──
+    n_variants = st.number_input(
+        "Jumlah variant (selain baseline):",
+        min_value=1, max_value=20, value=st.session_state.sim_manual_variant_count, step=1,
+        key='sim_n_variants'
+    )
+    st.session_state.sim_manual_variant_count = n_variants
+
+    df_scenario = None
+
+    if selected_pids:
+        # ── QUICK ACTION: apply % to all ──
+        st.markdown("##### ⚡ Quick Action — Apply % ke semua SKU terpilih")
+        qa_col1, qa_col2, qa_col3 = st.columns([1.5, 1, 1])
+        with qa_col1:
+            qa_pct = st.slider("Δ% dari baseline:", min_value=-50.0, max_value=50.0,
+                               value=0.0, step=0.5, format="%.1f%%", key='sim_qa_pct')
+        with qa_col2:
+            qa_target = st.selectbox("Apply ke:", [f"Var {i+1}" for i in range(n_variants)],
+                                     key='sim_qa_target')
+        with qa_col3:
+            st.write(""); st.write("")
+            if st.button("Apply", key='sim_qa_apply', use_container_width=True):
+                target_idx = int(qa_target.split(' ')[1]) - 1
+                for pid in selected_pids:
+                    base = st.session_state.sim_manual_scenarios.get(pid, {}).get(
+                        'baseline',
+                        df_master.loc[df_master['product_id'] == pid, 'selling_price'].iloc[0])
+                    st.session_state.sim_manual_scenarios.setdefault(pid, {})[f'var_{target_idx+1}'] = \
+                        base * (1 + qa_pct / 100)
+                st.rerun()
+
+        # ── EDITOR ──
+        st.markdown("##### 🧮 Edit harga per SKU")
+        st.caption("Baseline default = current selling_price. Edit baseline atau variant mana pun "
+                   "— hasil di bawah otomatis ikut berubah.")
+
+        editor_rows = []
+        for pid in selected_pids:
+            master_row = df_master[df_master['product_id'] == pid].iloc[0]
+            current_price = master_row['selling_price']
+            scn = st.session_state.sim_manual_scenarios.get(pid, {})
+            row = {
+                'product_id': pid,
+                'product_name': str(master_row['product_name'])[:50],
+                'current_price': current_price,
+                'baseline': scn.get('baseline', current_price),
+            }
+            for i in range(n_variants):
+                vk = f'var_{i+1}'
+                row[vk] = scn.get(vk, scn.get('baseline', current_price))
+            editor_rows.append(row)
+
+        editor_df = pd.DataFrame(editor_rows)
+
+        edited_df = st.data_editor(
+            editor_df,
+            column_config={
+                'product_id':    st.column_config.TextColumn("Product ID", disabled=True, width="small"),
+                'product_name':  st.column_config.TextColumn("Product Name", disabled=True, width="medium"),
+                'current_price': st.column_config.NumberColumn("Current Price", disabled=True, format="%.0f", width="small"),
+                'baseline':      st.column_config.NumberColumn("Baseline", format="%.0f", width="small"),
+                **{f'var_{i+1}': st.column_config.NumberColumn(f"Var {i+1}", format="%.0f", width="small")
+                   for i in range(n_variants)}
+            },
+            hide_index=True,
+            use_container_width=True,
+            key='sim_editor'
         )
 
-        # Filter SKU
-        if search_query:
-            sq = search_query.lower().strip()
-            mask = (df_master['product_name'].astype(str).str.lower().str.contains(sq, na=False) |
-                    df_master['product_id'].astype(str).str.lower().str.contains(sq, na=False))
-            candidates = df_master[mask].head(50)
-        else:
-            candidates = df_master.head(50)
+        # Persist edited values back to state
+        for _, row in edited_df.iterrows():
+            pid = str(row['product_id'])
+            st.session_state.sim_manual_scenarios[pid] = {
+                'baseline': row['baseline'],
+                **{f'var_{i+1}': row[f'var_{i+1}'] for i in range(n_variants)}
+            }
 
-        st.caption(f"Showing top {len(candidates)} matches. Refine search untuk hasil lebih spesifik.")
+        # Build df_scenario
+        df_scenario = pd.DataFrame([
+            {
+                'product_id': pid,
+                'baseline': st.session_state.sim_manual_scenarios[pid].get('baseline'),
+                **{f'var_{i+1}': st.session_state.sim_manual_scenarios[pid].get(f'var_{i+1}')
+                   for i in range(n_variants)}
+            }
+            for pid in selected_pids
+        ])
 
-        # Multi-select
-        candidate_options = {
-            f"{row['product_id']} — {row['product_name'][:60]} (Rp {row['selling_price']:,.0f})": row['product_id']
-            for _, row in candidates.iterrows()
-        }
-        selected_labels = st.multiselect(
-            "Pilih SKU untuk disimulasi:",
-            options=list(candidate_options.keys()),
-            key='sim_multiselect'
-        )
-        selected_pids = [str(candidate_options[lbl]) for lbl in selected_labels]
-
-        # Variant count selector
-        n_variants = st.number_input(
-            "Berapa variant scenario yang lo mau? (selain baseline)",
-            min_value=1, max_value=20, value=st.session_state.sim_manual_variant_count, step=1,
-            key='sim_n_variants'
-        )
-        st.session_state.sim_manual_variant_count = n_variants
-
-        # Quick action: apply % change to all
-        if selected_pids:
-            st.markdown("##### ⚡ Quick Action — Apply % change to all selected")
-            qa_col1, qa_col2, qa_col3 = st.columns([1.5, 1, 1])
-            with qa_col1:
-                qa_pct = st.slider(
-                    "Δ% ke baseline:", min_value=-50.0, max_value=50.0, value=0.0, step=0.5,
-                    format="%.1f%%", key='sim_qa_pct'
-                )
-            with qa_col2:
-                qa_target = st.selectbox(
-                    "Apply ke:", [f"Var {i+1}" for i in range(n_variants)],
-                    key='sim_qa_target'
-                )
-            with qa_col3:
-                st.write("")
-                st.write("")
-                if st.button("Apply", key='sim_qa_apply', use_container_width=True):
-                    target_idx = int(qa_target.split(' ')[1]) - 1
-                    for pid in selected_pids:
-                        base = df_master.loc[df_master['product_id'].astype(str) == pid,
-                                              'selling_price'].iloc[0]
-                        if pid not in st.session_state.sim_manual_scenarios:
-                            st.session_state.sim_manual_scenarios[pid] = {}
-                        st.session_state.sim_manual_scenarios[pid][f'var_{target_idx+1}'] = base * (1 + qa_pct/100)
-                    st.rerun()
-
-            # Editor table
-            st.markdown("##### 🧮 Edit scenario per SKU")
-            st.caption("Baseline default = current selling_price. Edit nilai manual di tabel ini.")
-
-            # Build editor dataframe
-            editor_rows = []
-            for pid in selected_pids:
-                master_row = df_master[df_master['product_id'].astype(str) == pid].iloc[0]
-                current_price = master_row['selling_price']
-
-                # Initialize state
-                if pid not in st.session_state.sim_manual_scenarios:
-                    st.session_state.sim_manual_scenarios[pid] = {'baseline': current_price}
-
-                row = {
-                    'product_id': pid,
-                    'product_name': master_row['product_name'][:50],
-                    'current_price': current_price,
-                    'baseline': st.session_state.sim_manual_scenarios[pid].get('baseline', current_price),
-                }
-                for i in range(n_variants):
-                    var_key = f'var_{i+1}'
-                    row[var_key] = st.session_state.sim_manual_scenarios[pid].get(var_key, current_price)
-                editor_rows.append(row)
-
-            editor_df = pd.DataFrame(editor_rows)
-
-            edited_df = st.data_editor(
-                editor_df,
-                column_config={
-                    'product_id':    st.column_config.TextColumn("Product ID", disabled=True, width="small"),
-                    'product_name':  st.column_config.TextColumn("Product Name", disabled=True, width="medium"),
-                    'current_price': st.column_config.NumberColumn("Current Price", disabled=True, format="%.0f", width="small"),
-                    'baseline':      st.column_config.NumberColumn("Baseline", format="%.0f", width="small"),
-                    **{f'var_{i+1}': st.column_config.NumberColumn(f"Var {i+1}", format="%.0f", width="small")
-                       for i in range(n_variants)}
-                },
-                hide_index=True,
-                use_container_width=True,
-                key='sim_editor'
-            )
-
-            # Save edited values back to session state
-            for _, row in edited_df.iterrows():
-                pid = str(row['product_id'])
-                st.session_state.sim_manual_scenarios[pid] = {
-                    'baseline': row['baseline'],
-                    **{f'var_{i+1}': row[f'var_{i+1}'] for i in range(n_variants)}
-                }
-
-            # Build df_scenario from manual builder
-            df_scenario_rows = []
-            for pid in selected_pids:
-                scn = st.session_state.sim_manual_scenarios.get(pid, {})
-                if not scn:
-                    continue
-                df_scenario_rows.append({
-                    'product_id': pid,
-                    'baseline': scn.get('baseline'),
-                    **{f'var_{i+1}': scn.get(f'var_{i+1}') for i in range(n_variants)}
-                })
-            df_scenario = pd.DataFrame(df_scenario_rows) if df_scenario_rows else None
-
-            if df_scenario is not None and not df_scenario.empty:
-                # Save scenario as bytes for caching
-                scenario_buf = io.BytesIO()
-                df_scenario.to_csv(scenario_buf, index=False)
-                st.session_state.sim_scenario_bytes = scenario_buf.getvalue()
-                st.session_state.sim_scenario_name = "_manual_scenario.csv"
-
-                st.success(f"✅ {len(df_scenario)} SKU · {n_variants} variants ready")
-
-    # ── RUN SIMULATION ──
+    # ── AUTO-RECOMPUTE (no Run button) ──
     if df_scenario is not None and not df_scenario.empty:
-        st.markdown("---")
-        if st.button("🚀 Run Simulation", type="primary", use_container_width=False, key='sim_run'):
-            with st.spinner("Computing scenario impact..."):
-                try:
-                    result = cached_sim_compute(
-                        st.session_state.sim_master_bytes,
-                        st.session_state.sim_master_name,
-                        st.session_state.sim_scenario_bytes,
-                        st.session_state.sim_scenario_name,
-                    )
-                    st.session_state.sim_result = result
-                    st.session_state.sim_excel_ready = False
-                    if 'sim_excel_bytes' in st.session_state:
-                        del st.session_state.sim_excel_bytes
-                    st.success(f"✅ {result['meta']['n_sku_simulated']:,} SKU simulated. "
-                               f"{result['meta']['n_variants']} variants.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Simulation error: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
+        try:
+            result = sim_compute(df_master, df_scenario)
+            st.session_state.sim_result = result
+            # Stash scenario bytes so Excel builder can reuse it
+            buf = io.BytesIO()
+            df_scenario.to_csv(buf, index=False)
+            st.session_state.sim_scenario_bytes = buf.getvalue()
+            st.session_state.sim_scenario_name = "_manual_scenario.csv"
+            st.session_state.sim_excel_ready = False
+            if 'sim_excel_bytes' in st.session_state:
+                del st.session_state.sim_excel_bytes
+            st.caption(f"🔄 Auto-updated · {result['meta']['n_sku_simulated']:,} SKU · "
+                       f"{result['meta']['n_variants']} variants")
+        except Exception as e:
+            st.error(f"❌ Simulation error: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    else:
+        st.session_state.sim_result = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
