@@ -2,12 +2,13 @@
 PI Analyzer — Streamlit Web App (Page 2)
 Pricing Index movement decomposition vs competitor.
 
-Author: Shadqi (Pricing Strategy Analyst, Astro)
+Author: Shadqi (Pricing Strategy Analyst)
 """
 import io
 import sys
 import os
 import streamlit as st
+from brand import inject_brand, render_brand_header
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -21,7 +22,7 @@ from dummy_data import dummy_pi_bytes
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PI Analyzer — Astro Pricing",
+    page_title="PI Analyzer — Pricing",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="auto",
@@ -53,47 +54,7 @@ def cached_pi_excel_bytes(file_bytes, file_name):
     return buf.getvalue()
 
 # Custom CSS — mirror Page 1
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .kpi-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 10px;
-        padding: 16px 20px;
-        background: #FFFFFF;
-        height: 100%;
-    }
-    .kpi-label { font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-    .kpi-value { font-size: 28px; font-weight: 700; color: #111827; margin: 4px 0; }
-    .kpi-delta-pos { font-size: 14px; color: #059669; font-weight: 600; }
-    .kpi-delta-neg { font-size: 14px; color: #DC2626; font-weight: 600; }
-    .kpi-delta-neu { font-size: 14px; color: #6B7280; font-weight: 600; }
-    .kpi-sub { font-size: 11px; color: #9CA3AF; margin-top: 4px; }
-    .banner-warn {
-        background: #FEF3C7;
-        border-left: 4px solid #F59E0B;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .banner-info {
-        background: #DBEAFE;
-        border-left: 4px solid #2563EB;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .section-header {
-        font-size: 22px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -759,8 +720,7 @@ if st.session_state.pi_analysis is None:
 # ─────────────────────────────────────────────────────────────────────────────
 col_title, col_clear = st.columns([5, 1])
 with col_title:
-    st.title("📈 PI Analyzer")
-    st.caption("Pricing Index Movement Decomposition vs Competitor — Astro Pricing Strategy")
+    render_brand_header("PI Analyzer", "Pricing Index Movement Decomposition vs Competitor")
 with col_clear:
     st.write("")
     if st.session_state.pi_analysis is not None and not st.session_state.pi_is_dummy:
@@ -780,7 +740,7 @@ if st.session_state.pi_is_dummy:
     st.info(
         "ℹ️ **Demo mode** — saat ini menampilkan **dummy data** (600 SKU random fictional). "
         "Upload file Excel/CSV lo di bawah untuk replace dengan data asli. "
-        "Semua product ID, nama, dan metrik di sini bukan data Astro production."
+        "Semua product ID, nama, dan metrik di sini bukan data production."
     )
 
 
@@ -1358,14 +1318,14 @@ if st.session_state.pi_analysis is not None and not file_changed:
             | **Down** | Δ absolute ≤ **-5,000 IDR** **OR** Δ percent ≤ **-5%** |
             | **Stay** | selain Up dan Down (Δ < 5,000 IDR dan abs Δ % < 5%) |
 
-            **PRICE direction** = pergerakan harga Astro dari P1 ke P2
+            **PRICE direction** = pergerakan harga dari P1 ke P2
             **COMP direction** = pergerakan harga blended competitor dari P1 ke P2
 
             **Cell interpretation:**
-            - **Diagonal (Down-Down / Stay-Stay / Up-Up)**: Astro **follow** gerakan competitor — pricing aligned
-            - **Off-diagonal**: Astro **NOT follow** competitor — misaligned
-            - **PRICE Stay × COMP Up**: competitor naik harga, Astro stay → PI Astro turun otomatis (lebih kompetitif), bisa jadi opportunity raise price
-            - **PRICE Stay × COMP Down**: competitor turun harga, Astro stay → PI Astro naik otomatis (uncompetitive), butuh respond
+            - **Diagonal (Down-Down / Stay-Stay / Up-Up)**: kita **follow** gerakan competitor — pricing aligned
+            - **Off-diagonal**: kita **NOT follow** competitor — misaligned
+            - **PRICE Stay × COMP Up**: competitor naik harga, kita stay → PI turun otomatis (lebih kompetitif), bisa jadi opportunity raise price
+            - **PRICE Stay × COMP Down**: competitor turun harga, kita stay → PI naik otomatis (uncompetitive), butuh respond
             """)
 
         # Count matrix with Total row/col
@@ -1540,7 +1500,7 @@ if st.session_state.pi_analysis is not None and not file_changed:
 
     # Tab 2: by Price Effect
     with mover_tabs[1]:
-        st.caption("Mover dengan **Price Effect** (eff_price) terbesar — kontribusi perubahan harga Astro ke PI movement.")
+        st.caption("Mover dengan **Price Effect** (eff_price) terbesar — kontribusi perubahan harga ke PI movement.")
         ex_p = df[df['sku_type'] == 'Existing'].dropna(subset=['eff_price']).copy()
         if len(ex_p) == 0:
             st.info("Tidak ada data dengan Price Effect.")
@@ -1549,12 +1509,12 @@ if st.session_state.pi_analysis is not None and not file_changed:
             price_loss = ex_p.nsmallest(30, 'eff_price')
             p_col1, p_col2 = st.columns(2)
             with p_col1:
-                st.markdown("**🔼 Top 30 — Price Effect Push UP (Astro naik harga)**")
+                st.markdown("**🔼 Top 30 — Price Effect Push UP (kita naik harga)**")
                 df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(price_gain.iterrows())])
                 st.dataframe(df_top.style.format(fmt_mover),
                              use_container_width=True, hide_index=True, height=600)
             with p_col2:
-                st.markdown("**🔽 Top 30 — Price Effect Push DOWN (Astro turun harga)**")
+                st.markdown("**🔽 Top 30 — Price Effect Push DOWN (kita turun harga)**")
                 df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(price_loss.iterrows())])
                 st.dataframe(df_top.style.format(fmt_mover),
                              use_container_width=True, hide_index=True, height=600)
@@ -1570,12 +1530,12 @@ if st.session_state.pi_analysis is not None and not file_changed:
             comp_loss = ex_c.nsmallest(30, 'eff_comp')
             c_col1, c_col2 = st.columns(2)
             with c_col1:
-                st.markdown("**🔼 Top 30 — Comp Effect Push UP (comp TURUN harga → PI Astro naik)**")
+                st.markdown("**🔼 Top 30 — Comp Effect Push UP (comp TURUN harga → PI naik)**")
                 df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(comp_gain.iterrows())])
                 st.dataframe(df_top.style.format(fmt_mover),
                              use_container_width=True, hide_index=True, height=600)
             with c_col2:
-                st.markdown("**🔽 Top 30 — Comp Effect Push DOWN (comp NAIK harga → PI Astro turun)**")
+                st.markdown("**🔽 Top 30 — Comp Effect Push DOWN (comp NAIK harga → PI turun)**")
                 df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(comp_loss.iterrows())])
                 st.dataframe(df_top.style.format(fmt_mover),
                              use_container_width=True, hide_index=True, height=600)
@@ -1790,7 +1750,7 @@ if st.session_state.pi_analysis is not None and not file_changed:
                 f"Lower triangle (PI turun = lebih kompetitif): **{n_down:,}**."
             )
             st.caption(
-                "**Interpretation:** Pola transition kasih insight macro tentang shift positioning portfolio Astro. "
+                "**Interpretation:** Pola transition kasih insight macro tentang shift positioning portfolio. "
                 "Mayoritas di diagonal = portfolio stabil. Banyak movement ke bawah-kiri = portfolio jadi lebih kompetitif. "
                 "Banyak movement ke atas-kanan = portfolio jadi lebih premium / mahal."
             )
