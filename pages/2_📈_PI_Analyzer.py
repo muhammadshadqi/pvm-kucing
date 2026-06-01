@@ -1,1939 +1,1784 @@
-"""
-PI Analyzer — Streamlit Web App (Page 2)
-Pricing Index movement decomposition vs competitor.
-
-Author: Shadqi (Pricing Strategy Analyst, Astro)
-"""
-import io
-import sys
-import os
-import streamlit as st
+import os, sys, glob, time
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-# Add parent dir to path so we can import pi_analyzer_v1
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pi_analyzer_v1 import compute as pi_compute, generate_excel as pi_generate_excel
+# ─────────────────────────────────────────────
+# COLORS
+# ─────────────────────────────────────────────
+NAVY       = "1C4587"
+NAVY_LT    = "2A5BA8"
+WHITE      = "FFFFFF"
+LT_BLUE    = "EEF2FB"
+RED_TXT    = "C0392B"
+GREEN_TXT  = "1A7A4A"
+MUTED      = "A0A8C0"
+SUB_BG     = "F7F8FC"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="PI Analyzer — Astro Pricing",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="auto",
-)
+SEG_COLORS = {
+    "Overall": ("1C4587", "EEF2FB"),
+    "Dry":     ("145A32", "E8F5EE"),
+    "Fresh":   ("1A5276", "EBF5FB"),
+    "Frozen":  ("6C3483", "F5EEF8"),
+}
 
+def _s(style="thin", color="CCCCCC"): return Side(style=style, color=color)
+def bb(color="CCCCCC"):               return Border(bottom=_s(color=color))
+def thick_l(bottom=True):
+    return Border(left=_s("medium","1C4587"), bottom=_s() if bottom else None)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CACHED HELPERS (analytical computation cached by file hash)
-# ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False, max_entries=3)
-def cached_pi_compute(file_bytes, file_name):
-    """Cache PI compute result by file content hash. Excel NOT included."""
-    import io
-    if file_name.lower().endswith('.csv'):
-        df = pd.read_csv(io.BytesIO(file_bytes))
+def sc(ws, r, c, v=None, bold=False, italic=False, bg=None, fc="000000",
+       align="left", fmt=None, fs=10, wrap=False, bdr=None, ind=0):
+    cell = ws.cell(row=r, column=c)
+    if v is not None: cell.value = v
+    cell.font = Font(name="Calibri", bold=bold, italic=italic, size=fs, color=fc)
+    if bg: cell.fill = PatternFill("solid", fgColor=bg)
+    cell.alignment = Alignment(horizontal=align, vertical="center",
+                                wrap_text=wrap, indent=ind)
+    if fmt: cell.number_format = fmt
+    if bdr: cell.border = bdr
+    return cell
+
+def hdr(ws, r, labels, bg=NAVY, fc=WHITE, h=22, sc0=1):
+    for i, l in enumerate(labels):
+        sc(ws, r, sc0+i, l, bold=True, bg=bg, fc=fc,
+           align="center", fs=9, wrap=True, bdr=bb("2A5BA8"))
+    ws.row_dimensions[r].height = h
+
+def sec(ws, r, text, ncols=10, seg=None):
+    bg, _ = SEG_COLORS.get(seg or "Overall", SEG_COLORS["Overall"])
+    label  = f"  {seg.upper()}  —  {text}" if seg else f"  {text}"
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncols)
+    sc(ws, r, 1, label, bold=True, bg=bg, fc=WHITE, fs=12)
+    ws.row_dimensions[r].height = 26
+
+def cw(ws, widths):
+    for col, w in widths.items():
+        ws.column_dimensions[get_column_letter(col) if isinstance(col,int) else col].width = w
+
+# ─────────────────────────────────────────────
+# PROGRESS
+# ─────────────────────────────────────────────
+def progress(msg, current=None, total=None):
+    if current is not None and total is not None:
+        pct  = current / total
+        done = int(pct * 20)
+        bar  = "█" * done + "░" * (20 - done)
+        print(f"\r  [{bar}] {pct*100:5.1f}%  {msg}", end="", flush=True)
     else:
-        df = pd.read_excel(io.BytesIO(file_bytes))
-    return pi_compute(df)
+        print(f"  {msg}", flush=True)
 
-
-@st.cache_data(show_spinner=False, max_entries=2)
-def cached_pi_excel_bytes(file_bytes, file_name):
-    """Cache Excel workbook bytes (separate cache from compute)."""
-    import io
-    result = cached_pi_compute(file_bytes, file_name)
-    wb = pi_generate_excel(result)
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-# Custom CSS — mirror Page 1
-st.markdown("""
-<style>
-    .main > div { padding-top: 1rem; }
-    .kpi-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 10px;
-        padding: 16px 20px;
-        background: #FFFFFF;
-        height: 100%;
-    }
-    .kpi-label { font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-    .kpi-value { font-size: 28px; font-weight: 700; color: #111827; margin: 4px 0; }
-    .kpi-delta-pos { font-size: 14px; color: #059669; font-weight: 600; }
-    .kpi-delta-neg { font-size: 14px; color: #DC2626; font-weight: 600; }
-    .kpi-delta-neu { font-size: 14px; color: #6B7280; font-weight: 600; }
-    .kpi-sub { font-size: 11px; color: #9CA3AF; margin-top: 4px; }
-    .banner-warn {
-        background: #FEF3C7;
-        border-left: 4px solid #F59E0B;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .banner-info {
-        background: #DBEAFE;
-        border-left: 4px solid #2563EB;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 16px;
-    }
-    .section-header {
-        font-size: 22px;
-        font-weight: 700;
-        color: #111827;
-        margin-top: 32px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-REQUIRED_COLS = [
-    'product_id', 'product_name', 'l1_category_name', 'pricing_bl_25',
-    'pareto_classification', 'source_status',
-    'price', 'next_price', 'cogs', 'next_cogs',
-    'comp_price', 'next_comp_price',
-    'normal_comp_price', 'next_normal_comp_price',
-    'pi', 'next_pi',
-]
-PERIOD_PAIRS = [('week_key', 'next_week'), ('month_key', 'next_month')]
-
-SEGMENTS = ['Dry', 'Fresh', 'Frozen']
-
-PI_BINS_LBL  = ["A.<95", "B.95-<100", "C.100-105", "D.105-110", "E.110-120", "F.>120"]
-CI_BINS_LBL  = ["A.<70", "B.70-85", "C.85-95", "D.95-105", "E.>105"]
-MG_BINS_LBL  = ["A.<-20%", "B.-20to-10%", "C.-10to0%", "D.0to10%",
-                "E.10to20%", "F.20to30%", "G.30to50%", "H.>50%"]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-def fmt_pi(v, decimals=2):
-    """Format PI value (just a number, no unit since PI is unitless ratio)."""
-    if pd.isna(v): return "—"
-    return f"{v:,.{decimals}f}"
-
-def fmt_pi_delta(v, decimals=3):
-    """Format PI delta with sign."""
-    if pd.isna(v): return "—"
-    return f"{v:+.{decimals}f}"
-
-def fmt_pct(v, decimals=2):
-    if pd.isna(v): return "—"
-    return f"{v*100:.{decimals}f}%"
-
-def fmt_count(v):
-    if pd.isna(v): return "—"
-    return f"{int(v):,}"
-
-def kpi_card(label, value, delta=None, delta_label=None, sub=None, delta_inverse=False):
-    """Build HTML for KPI card."""
-    delta_html = ""
-    if delta is not None and delta_label is not None:
-        if delta == 0:
-            cls = "kpi-delta-neu"
-            arrow = "—"
-        else:
-            # delta_inverse=True means lower=better (e.g. PI lower vs competitor)
-            is_positive = delta > 0
-            if delta_inverse:
-                cls = "kpi-delta-neg" if is_positive else "kpi-delta-pos"
-            else:
-                cls = "kpi-delta-pos" if is_positive else "kpi-delta-neg"
-            arrow = "▲" if is_positive else "▼"
-        delta_html = f'<div class="{cls}">{arrow} {delta_label}</div>'
-
-    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
-
-    return f'''<div class="kpi-card">
-<div class="kpi-label">{label}</div>
-<div class="kpi-value">{value}</div>
-{delta_html}
-{sub_html}
-</div>'''
-
-
-def gradient_color(val, vmax):
-    """Return CSS background+text color for gradient red-white-green."""
-    if pd.isna(val): return ''
-    if vmax == 0: return ''
-    norm = max(-1, min(1, val / vmax))
-    if norm > 0:
-        alpha = norm
-        r = int(255 - (255-22) * alpha)
-        g = int(255 - (255-163) * alpha)
-        b = int(255 - (255-74) * alpha)
-        return f'background-color: rgb({r},{g},{b}); color: #111827;'
-    elif norm < 0:
-        alpha = -norm
-        r = int(255 - (255-220) * alpha)
-        g = int(255 - (255-38) * alpha)
-        b = int(255 - (255-38) * alpha)
-        text_color = '#FFFFFF' if alpha > 0.6 else '#111827'
-        return f'background-color: rgb({r},{g},{b}); color: {text_color};'
-    return ''
-
-
-def make_template_pi_excel():
-    """Generate a template Excel with required columns."""
-    from openpyxl import Workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Raw Input Template"
-
-    headers = ['week_key', 'next_week'] + REQUIRED_COLS
-    for c, h in enumerate(headers, 1):
-        ws.cell(1, c, h)
-
-    # Add note
-    ws.cell(3, 1, "Note: Required period cols: 'week_key' + 'next_week' OR 'month_key' + 'next_month'")
-    ws.cell(4, 1, "All numeric cols (price, cogs, comp_price, normal_comp_price, pi) bisa NaN untuk New/Departing SKU.")
-
-    out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TORNADO CHART (Zone 3)
-# ─────────────────────────────────────────────────────────────────────────────
-def make_pi_tornado(decomp_dict, scope_label='Overall'):
-    """
-    Tornado horizontal bar chart of 5 PI effect components.
-    Components: eff_dep (Churned), eff_price, eff_normal_comp, eff_discount_comp, eff_new.
-    """
-    components = [
-        ('1. Churned SKU Effect', decomp_dict['eff_dep']),
-        ('2. Price Change Effect',       decomp_dict['eff_price']),
-        ('3.1 Normal Comp Price Effect', decomp_dict['eff_normal_comp']),
-        ('3.2 Discount (Blended) Comp Price Effect', decomp_dict['eff_discount_comp']),
-        ('4. New SKU Effect',     decomp_dict['eff_new']),
-    ]
-    # Sort by magnitude desc
-    sorted_comp = sorted(components, key=lambda x: abs(x[1]), reverse=True)
-    labels = [c[0] for c in sorted_comp][::-1]
-    values = [c[1] for c in sorted_comp][::-1]
-    colors = ['#059669' if v >= 0 else '#DC2626' for v in values]
-    text_vals = [f"{v:+.3f}" for v in values]
-
-    total = decomp_dict.get('total', sum(c[1] for c in components))
-
-    fig = go.Figure(go.Bar(
-        x=values,
-        y=labels,
-        orientation='h',
-        marker_color=colors,
-        text=text_vals,
-        textposition='outside',
-        cliponaxis=False,
+# ─────────────────────────────────────────────
+# FILE SELECTOR
+# ─────────────────────────────────────────────
+def select_file():
+    sd = os.path.dirname(os.path.abspath(__file__))
+    found = sorted(set(
+        f for pat in ["*.csv","*.xlsx","*.xls"]
+        for f in glob.glob(os.path.join(sd, pat))
     ))
-    fig.update_layout(
-        title=f"PI Movement Decomposition — {scope_label}  |  Total Δ: {total:+.3f} (A={decomp_dict['A']:.2f} → E={decomp_dict['E']:.2f})",
-        showlegend=False,
-        height=420,
-        margin=dict(l=20, r=80, t=60, b=40),
-        xaxis_title='PI points',
-        plot_bgcolor='white',
-        bargap=0.35,
-    )
-    fig.update_xaxes(showgrid=True, gridcolor='#F3F4F6', zeroline=True,
-                     zerolinecolor='#9CA3AF', zerolinewidth=2)
-    fig.update_yaxes(showgrid=False)
-    return fig
+    if not found:
+        print("Tidak ada file CSV/Excel di folder ini."); sys.exit(1)
+    print("\n📂  File yang ditemukan:")
+    for i, f in enumerate(found):
+        print(f"  [{i+1}] {os.path.basename(f)}  ({os.path.getsize(f)/1024:.1f} KB)")
+    while True:
+        try:
+            c = int(input("\nPilih nomor file: "))
+            if 1 <= c <= len(found): return found[c-1]
+        except ValueError: pass
+        print("  Input tidak valid.")
 
+# ─────────────────────────────────────────────
+# LOAD
+# ─────────────────────────────────────────────
+def load_data(fp):
+    ext = os.path.splitext(fp)[1].lower()
+    print(f"\n⏳  Membaca {os.path.basename(fp)} ...")
+    t0 = time.time()
+    df = pd.read_csv(fp) if ext == ".csv" else pd.read_excel(fp, engine="openpyxl")
+    print(f"✅  {len(df):,} baris dimuat ({time.time()-t0:.1f}s)")
+    return df
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Tabel PI Decomposition per Scope (Zone 3 Tabel)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pi_decomp_table(overall, segments, contribs):
-    """
-    Tabel 1: Per-segment PI decomposition with overall column.
-    Methodology mirrors Sheet 2 in Excel output.
-    Rows: A baseline, 5 effect components, E result, Total Δ.
-    Cols: Overall, Dry, Fresh, Frozen.
-    """
-    rows = []
-    rows.append({
-        'Step': 'Baseline — Avg PI Prev (A)',
-        'Overall': overall['A'],
-        'Dry':     segments['Dry']['A'],
-        'Fresh':   segments['Fresh']['A'],
-        'Frozen':  segments['Frozen']['A'],
-    })
-    for label, key in [
-        ('1. Churned SKU Effect',          'eff_dep'),
-        ('2. Price Change Effect',         'eff_price'),
-        ('3. Comp Price Effect',  'eff_comp'),
-        ('    3.1 Normal Comp Price Effect',       'eff_normal_comp'),
-        ('    3.2 Discount (Blended) Comp Price Effect', 'eff_discount_comp'),
-        ('4. New SKU Effect',              'eff_new'),
+def detect_period(df):
+    if "week_key"  in df.columns: return "week",  "week_key",  "next_week"
+    if "month_key" in df.columns: return "month", "month_key", "next_month"
+    raise ValueError("Kolom period tidak ditemukan.")
+
+# ─────────────────────────────────────────────
+# BINS & LABELS
+# ─────────────────────────────────────────────
+PI_BINS = [0,95,100,105,110,120,9999]
+PI_LBL  = ["A.<95","B.95-<100","C.100-105","D.105-110","E.110-120","F.>120"]
+CI_BINS = [0,70,85,95,105,9999]
+CI_LBL  = ["A.<70","B.70-85","C.85-95","D.95-105","E.>105"]
+MG_BINS = [-9999,-0.20,-0.10,0,0.10,0.20,0.30,0.50,9999]
+MG_LBL  = ["A.<-20%","B.-20to-10%","C.-10to0%","D.0to10%",
+           "E.10to20%","F.20to30%","G.30to50%","H.>50%"]
+
+# ─────────────────────────────────────────────
+# ENRICH  (vectorised)
+# ─────────────────────────────────────────────
+def enrich(df):
+    print("⏳  Enriching data ...")
+    t0 = time.time()
+    d = df.copy()
+    print(repr(d.columns.tolist()))
+    print(d[["pi","next_pi"]].dtypes)
+
+    # SKU type
+    d["sku_type"] = "Existing"
+    d.loc[d["pi"].isna()  & d["next_pi"].notna(), "sku_type"] = "New SKU"
+    d.loc[d["pi"].notna() & d["next_pi"].isna(),  "sku_type"] = "Departing SKU"
+
+    # rename: treat "prev" = original columns, "current" = next_* columns
+    # We keep original col names internally but rename for display in Sheet 1
+
+    # Margins
+    d["margin_prev"]    = d["price"]      - d["cogs"]
+    d["margin_pct_prev"]= d["margin_prev"]/ d["price"]
+    d["margin_cur"]     = d["next_price"] - d["next_cogs"]
+    d["margin_pct_cur"] = d["margin_cur"] / d["next_price"]
+
+    # Diffs (prev → current)
+    for prev, cur, pfx in [
+        ("price",      "next_price",      "price"),
+        ("cogs",       "next_cogs",       "cogs"),
+        ("comp_price", "next_comp_price", "comp"),
+        ("margin_prev","margin_cur",      "margin"),
     ]:
-        rows.append({
-            'Step': label,
-            'Overall': overall[key],
-            'Dry':     segments['Dry'][key],
-            'Fresh':   segments['Fresh'][key],
-            'Frozen':  segments['Frozen'][key],
-        })
-    rows.append({
-        'Step': 'Total Δ',
-        'Overall': overall['total'],
-        'Dry':     segments['Dry']['total'],
-        'Fresh':   segments['Fresh']['total'],
-        'Frozen':  segments['Frozen']['total'],
-    })
-    rows.append({
-        'Step': 'Result — Avg PI Cur (E)',
-        'Overall': overall['E'],
-        'Dry':     segments['Dry']['E'],
-        'Fresh':   segments['Fresh']['E'],
-        'Frozen':  segments['Frozen']['E'],
-    })
-    return pd.DataFrame(rows)
+        d[f"diff_{pfx}"]     = d[cur] - d[prev]
+        d[f"diff_{pfx}_pct"] = d[f"diff_{pfx}"] / d[prev].replace(0, np.nan)
 
+    d["diff_pi"]     = d["next_pi"] - d["pi"]
+    d["diff_pi_pct"] = d["diff_pi"] / d["pi"].replace(0, np.nan)
 
-def build_pi_contrib_table(overall, contribs):
-    """
-    Tabel 2: Per-segment contribution to OVERALL effect (exact math identity).
-    Each cell = exact_contributions formula. Sum across segments = overall (exact).
-    Structure:
-      - Row 1: Overall PI Prev (A) [baseline reference, top]
-      - Rows 2-7: 6 effects (Churned, Price, Comp, Normal, Discount, New)
-      - Row 8: Total Δ (sum of effects)
-      - Row 9: Overall PI Cur (E) [result reference, bottom]
-    """
-    rows = []
+    # COGS Index
+    d["ci_prev"] = d["cogs"]      * 100 / d["comp_price"].replace(0, np.nan)
+    d["ci_cur"]  = d["next_cogs"] * 100 / d["next_comp_price"].replace(0, np.nan)
 
-    # Row 1: Baseline reference (top)
-    rows.append({
-        'Effect': 'Overall PI Prev (A)',
-        'Dry contrib':    None,
-        'Fresh contrib':  None,
-        'Frozen contrib': None,
-        'Overall (sum)':  None,
-        'Overall actual': overall['A'],
-    })
-
-    # Rows 2-7: 6 effects
-    for label, key in [
-        ('1. Churned SKU Effect',                  'eff_dep'),
-        ('2. Price Change Effect',                 'eff_price'),
-        ('3. Comp Price Effect',                   'eff_comp'),
-        ('  3.1 Normal Comp Price Effect',         'eff_normal_comp'),
-        ('  3.2 Discount (Blended) Comp Price Effect', 'eff_discount_comp'),
-        ('4. New SKU Effect',                      'eff_new'),
+    # Groups — prev and current
+    for col, bins, lbls, out in [
+        ("pi",          PI_BINS, PI_LBL, "pi_group_prev"),
+        ("next_pi",     PI_BINS, PI_LBL, "pi_group_cur"),
+        ("ci_prev",     CI_BINS, CI_LBL, "ci_group_prev"),
+        ("ci_cur",      CI_BINS, CI_LBL, "ci_group_cur"),
+        ("margin_pct_prev", MG_BINS, MG_LBL, "margin_group_prev"),
+        ("margin_pct_cur",  MG_BINS, MG_LBL, "margin_group_cur"),
     ]:
-        rows.append({
-            'Effect': label,
-            'Dry contrib':    contribs['Dry'][key],
-            'Fresh contrib':  contribs['Fresh'][key],
-            'Frozen contrib': contribs['Frozen'][key],
-            'Overall (sum)':  contribs['Dry'][key] + contribs['Fresh'][key] + contribs['Frozen'][key],
-            'Overall actual': overall[key],
-        })
+        d[out] = pd.cut(d[col], bins=bins, labels=lbls, right=False).astype(str)
+        d.loc[d[col].isna(), out] = None
 
-    # Row 8: Total Δ (sum of leaf effects: dep + price + comp + new). eff_comp already = normal+discount
-    total_dry    = contribs['Dry']['eff_dep'] + contribs['Dry']['eff_price'] + contribs['Dry']['eff_comp'] + contribs['Dry']['eff_new']
-    total_fresh  = contribs['Fresh']['eff_dep'] + contribs['Fresh']['eff_price'] + contribs['Fresh']['eff_comp'] + contribs['Fresh']['eff_new']
-    total_frozen = contribs['Frozen']['eff_dep'] + contribs['Frozen']['eff_price'] + contribs['Frozen']['eff_comp'] + contribs['Frozen']['eff_new']
-    rows.append({
-        'Effect': 'Total Δ',
-        'Dry contrib':    total_dry,
-        'Fresh contrib':  total_fresh,
-        'Frozen contrib': total_frozen,
-        'Overall (sum)':  total_dry + total_fresh + total_frozen,
-        'Overall actual': overall['total'],
-    })
+    # Tags (vectorised)
+    for prev, cur, tag in [
+        ("price",      "next_price",      "price_tag"),
+        ("cogs",       "next_cogs",       "cogs_tag"),
+        ("comp_price", "next_comp_price", "comp_tag"),
+    ]:
+        da = d[cur] - d[prev]
+        dp = da / d[prev].replace(0, np.nan)
+        d[tag] = "Stay"
+        d.loc[(da >= 5000) | (dp >= 0.05),  tag] = "Up"
+        d.loc[(da <= -5000) | (dp <= -0.05), tag] = "Down"
 
-    # Row 9: Result reference (bottom)
-    rows.append({
-        'Effect': 'Overall PI Cur (E)',
-        'Dry contrib':    None,
-        'Fresh contrib':  None,
-        'Frozen contrib': None,
-        'Overall (sum)':  None,
-        'Overall actual': overall['E'],
-    })
-    return pd.DataFrame(rows)
+    # Status labels
+    d["price_status"] = d["price_tag"].map(
+        {"Up":"Price Increase","Stay":"Price Stable","Down":"Price Reduction"})
+    d["cogs_status"]  = d["cogs_tag"].map(
+        {"Up":"Cost Pressure","Stay":"Cost Stable","Down":"Cost Improvement"})
+    d["comp_status"]  = d["comp_tag"].map(
+        {"Up":"Competitor Retreat","Stay":"Market Stable","Down":"Competitor Aggressive"})
 
+    # Framework check (uses current = next_pi, next_margin_pct)
+    pi_c  = d["next_pi"]
+    mg_c  = d["margin_pct_cur"]
+    bl    = d["pricing_bl_25"]
+    cond1 = (bl=="Fresh")  & (pi_c > 110) & (mg_c <= 0.15)
+    cond2 = (bl=="Frozen") & (pi_c > 100) & (mg_c <= 0.15)
+    cond3 = (bl=="Fresh")  & (pi_c > 120) & (mg_c >= 0.70)
+    cond4 = (bl=="Dry")    & (pi_c < 105) & (mg_c <= 0.00)
+    cond5 = (bl=="Dry")    & (pi_c > 120) & (mg_c > 0.40)
+    d["framework_check"] = None
+    d.loc[cond1|cond2|cond3|cond4|cond5, "framework_check"] = "TRUE"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: L1 Decomposition (Zone 4)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_l1_pi_table(df, scope='Overall'):
-    """
-    For each L1 category, run decompose() and return table.
-    scope: 'Overall' = all SKU, else filter by BL (Dry/Fresh/Frozen).
-    Adds Margin Before/After + Driver Effect identification.
-    """
-    from pi_analyzer_v1 import decompose
+    # Normal comp price columns (input dari raw data)
+    # discount_comp = normal_comp - comp_price  (potongan diskon kompetitor)
+    d["discount_comp_price"]      = d["normal_comp_price"]      - d["comp_price"]
+    d["next_discount_comp_price"] = d["next_normal_comp_price"] - d["next_comp_price"]
+    d["diff_normal_comp"]         = d["next_normal_comp_price"] - d["normal_comp_price"]
+    d["diff_discount_comp"]       = d["next_discount_comp_price"] - d["discount_comp_price"]
 
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
-    else:
-        df_scope = df.copy()
+    # Effect columns — existing SKU only (Shapley Value decomposition)
+    # Shapley = rata-rata dua urutan midpoint (B: price dulu, D: comp dulu)
+    # Zero residual by construction — tidak ada interaction term
+    ex_mask = d["pi"].notna() & d["next_pi"].notna()
+    comp0   = d["comp_price"].replace(0, np.nan)
+    comp1   = d["next_comp_price"].replace(0, np.nan)
+    price0  = d["price"].replace(0, np.nan)
 
-    if 'l1_category_name' not in df_scope.columns or len(df_scope) == 0:
-        return pd.DataFrame()
+    # Metode B: PI_mid = price_cur / comp_prev * 100
+    pi_mid_B = d["next_price"] / comp0 * 100
+    ep_B = pi_mid_B - d["pi"]
+    ec_B = d["next_pi"] - pi_mid_B
 
-    # Effect-key → friendly name map (for driver identification)
-    EFFECT_NAMES = {
-        'eff_dep':          '1. Churned',
-        'eff_price':        '2. Price',
-        'eff_normal_comp':  '3.1 Normal Comp',
-        'eff_discount_comp':'3.2 Discount Comp',
-        'eff_new':          '4. New SKU',
-    }
+    # Metode D: PI_mid = price_prev / comp_cur * 100
+    pi_mid_D = d["price"] / comp1 * 100
+    ec_D = pi_mid_D - d["pi"]
+    ep_D = d["next_pi"] - pi_mid_D
 
-    rows = []
-    for l1, g in df_scope.groupby('l1_category_name', dropna=False):
-        if pd.isna(l1):
-            continue
-        r = decompose(g)
-        ex_sub = g[g['sku_type'] == 'Existing']
+    # Shapley = avg(B, D)
+    d["eff_price"] = np.where(ex_mask, (ep_B + ep_D) / 2, np.nan)
+    d["eff_comp"]  = np.where(ex_mask, (ec_B + ec_D) / 2, np.nan)
 
-        # Margin Existing P1 vs P2
-        mg_p1 = ex_sub['margin_pct_prev'].mean() if 'margin_pct_prev' in ex_sub.columns and len(ex_sub) > 0 else np.nan
-        mg_p2 = ex_sub['margin_pct_cur'].mean()  if 'margin_pct_cur'  in ex_sub.columns and len(ex_sub) > 0 else np.nan
-        mg_delta = (mg_p2 - mg_p1) if (pd.notna(mg_p1) and pd.notna(mg_p2)) else np.nan
+    # Proportional split: eff_comp → eff_normal_comp + eff_discount_comp
+    # eff_normal_comp   = eff_comp × (Δnormal_comp / Δcomp)
+    # eff_discount_comp = eff_comp × (Δdiscount_comp / Δcomp)
+    # Jika Δcomp = 0 maka kedua efek = 0 (comp net tidak berubah)
+    delta_comp         = d["next_comp_price"] - d["comp_price"]
+    delta_normal_comp  = d["next_normal_comp_price"] - d["normal_comp_price"]
+    delta_discount_comp= d["next_discount_comp_price"] - d["discount_comp_price"]
+    ratio_normal  = np.where(delta_comp != 0, delta_normal_comp   / delta_comp, 0.0)
+    ratio_discount= np.where(delta_comp != 0, -delta_discount_comp / delta_comp, 0.0)
+    d["eff_normal_comp"]  = np.where(ex_mask, d["eff_comp"] * ratio_normal,  np.nan)
+    d["eff_discount_comp"]= np.where(ex_mask, d["eff_comp"] * ratio_discount, np.nan)
 
-        # Driver effect — find which leaf component (non-aggregate) has the biggest magnitude
-        # We use NORMAL & DISCOUNT comp separately (not aggregated eff_comp)
-        leaf_effects = {
-            'eff_dep':          r['eff_dep'],
-            'eff_price':        r['eff_price'],
-            'eff_normal_comp':  r['eff_normal_comp'],
-            'eff_discount_comp':r['eff_discount_comp'],
-            'eff_new':          r['eff_new'],
-        }
-        # Pick the effect with the same sign as Total Δ and largest magnitude
-        total = r['total']
-        if pd.notna(total) and total != 0:
-            same_sign = {k: v for k, v in leaf_effects.items() if (v >= 0) == (total >= 0)}
-            if same_sign:
-                driver_key = max(same_sign, key=lambda k: abs(same_sign[k]))
-                driver_name = EFFECT_NAMES[driver_key]
-                driver_val  = leaf_effects[driver_key]
-            else:
-                driver_key = max(leaf_effects, key=lambda k: abs(leaf_effects[k]))
-                driver_name = EFFECT_NAMES[driver_key]
-                driver_val  = leaf_effects[driver_key]
-        else:
-            driver_name = '—'
-            driver_val = 0
+    print(f"✅  Data enriched ({time.time()-t0:.1f}s)")
+    return d
 
-        rows.append({
-            'L1 Category': l1,
-            'BL (sample)': g['pricing_bl_25'].iloc[0] if 'pricing_bl_25' in g.columns else '—',
-            'n Existing':  r['n_ex'],
-            'n Departing': r['n_dep'],
-            'n New':       r['n_new'],
-            'Avg PI Prev (A)': r['A'],
-            'Avg PI Cur (E)':  r['E'],
-            'Total Δ':         r['total'],
-            'Driver':          driver_name,
-            'Driver Value':    driver_val,
-            'Margin % P1': mg_p1,
-            'Margin % P2': mg_p2,
-            'Margin Δ pp': mg_delta,
-            '1. Churned Eff':  r['eff_dep'],
-            '2. Price Eff':    r['eff_price'],
-            '3. Comp Price Eff':     r['eff_comp'],
-            '3.1 Normal Comp Eff': r['eff_normal_comp'],
-            '3.2 Discount Comp Eff': r['eff_discount_comp'],
-            '4. New SKU Eff':      r['eff_new'],
-        })
+# ─────────────────────────────────────────────
+# DECOMPOSITION  (returns rich dict)
+# ─────────────────────────────────────────────
+def decompose(d):
+    dep = d[d["pi"].notna() & d["next_pi"].isna()]
+    new = d[d["pi"].isna()  & d["next_pi"].notna()]
+    ex  = d[d["pi"].notna() & d["next_pi"].notna()]
 
-    out = pd.DataFrame(rows)
-    if not out.empty:
-        out = out.sort_values('Total Δ', ascending=False).reset_index(drop=True)
-    return out
+    n_ex  = len(ex);  n_dep = len(dep);  n_new = len(new)
+    n_cur = n_ex + n_dep;                n_nxt = n_ex + n_new
 
+    A = pd.concat([ex, dep])["pi"].mean()      if n_cur > 0 else np.nan
+    B = ex["pi"].mean()                         if n_ex  > 0 else np.nan
+    C = ex["next_pi"].mean()                    if n_ex  > 0 else np.nan
+    D = new["next_pi"].mean()                   if n_new > 0 else np.nan
+    E = (n_ex*C + n_new*D)/(n_nxt)              if n_new > 0 and not np.isnan(D) else C
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Pareto Decomposition (Zone 11)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pareto_pi_table(df, scope='Overall'):
-    """Same structure as L1 but dimension = pareto_classification."""
-    from pi_analyzer_v1 import decompose
+    eff_dep = (B - A) if not (np.isnan(A) or np.isnan(B)) else 0.0
 
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
-    else:
-        df_scope = df.copy()
+    s = ex.copy()
+    comp0  = s["comp_price"].replace(0, np.nan)
+    comp1  = s["next_comp_price"].replace(0, np.nan)
 
-    if 'pareto_classification' not in df_scope.columns or len(df_scope) == 0:
-        return pd.DataFrame()
+    # Metode B
+    pi_mid_B = s["next_price"] / comp0 * 100
+    ep_B = pi_mid_B - s["pi"]
+    ec_B = s["next_pi"] - pi_mid_B
 
-    rows = []
-    for pareto, g in df_scope.groupby('pareto_classification', dropna=False):
-        if pd.isna(pareto):
-            continue
-        r = decompose(g)
-        rows.append({
-            'Pareto Class':    pareto,
-            'n Existing':      r['n_ex'],
-            'n Departing':     r['n_dep'],
-            'n New':           r['n_new'],
-            'Avg PI Prev (A)': r['A'],
-            'Avg PI Cur (E)':  r['E'],
-            'Total Δ':         r['total'],
-            '1. Churned Eff':  r['eff_dep'],
-            '2. Price Eff':    r['eff_price'],
-            '3. Comp Price Eff':     r['eff_comp'],
-            '3.1 Normal Comp Eff': r['eff_normal_comp'],
-            '3.2 Discount Comp Eff': r['eff_discount_comp'],
-            '4. New SKU Eff':      r['eff_new'],
-        })
+    # Metode D
+    pi_mid_D = s["price"] / comp1 * 100
+    ec_D = pi_mid_D - s["pi"]
+    ep_D = s["next_pi"] - pi_mid_D
 
-    out = pd.DataFrame(rows)
-    if not out.empty:
-        out = out.sort_values('Pareto Class').reset_index(drop=True)
-    return out
+    # Shapley
+    s["ep"] = (ep_B + ep_D) / 2
+    s["ec"] = (ec_B + ec_D) / 2
 
+    ep = s["ep"].mean() if n_ex > 0 else 0.0
+    ec = s["ec"].mean() if n_ex > 0 else 0.0
+    en = (E - C)        if not (np.isnan(E) or np.isnan(C)) else 0.0
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Price × Comp Matrix (Zone 5)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_price_comp_matrix(df, scope='Overall'):
-    """
-    3×3 matrix: rows = price_tag (Down/Stay/Up), cols = comp_tag (Down/Stay/Up).
-    Cells = count of Existing SKU.
-    """
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
-    else:
-        df_scope = df.copy()
+    # Proportional split of eff_comp → eff_normal_comp + eff_discount_comp
+    delta_comp          = s["next_comp_price"] - s["comp_price"]
+    delta_normal_comp   = s["next_normal_comp_price"] - s["normal_comp_price"]
+    delta_discount_comp = s["next_discount_comp_price"] - s["discount_comp_price"]
+    ratio_n = np.where(delta_comp != 0, delta_normal_comp    / delta_comp, 0.0)
+    ratio_d = np.where(delta_comp != 0, -delta_discount_comp / delta_comp, 0.0)
+    s["enc"] = s["ec"] * ratio_n   # eff_normal_comp per SKU
+    s["edc"] = s["ec"] * ratio_d   # eff_discount_comp per SKU
+    enc = s["enc"].mean() if n_ex > 0 else 0.0
+    edc = s["edc"].mean() if n_ex > 0 else 0.0
 
-    ex = df_scope[df_scope['sku_type'] == 'Existing']
-    if len(ex) == 0:
-        return None, None
-
-    DIRS = ['Down', 'Stay', 'Up']
-    matrix = np.zeros((3, 3), dtype=int)
-    for ri, pr in enumerate(DIRS):
-        for ci, cr in enumerate(DIRS):
-            matrix[ri, ci] = int(((ex['price_tag'] == pr) & (ex['comp_tag'] == cr)).sum())
-
-    df_matrix = pd.DataFrame(
-        matrix,
-        index=[f'PRICE {d}' for d in DIRS],
-        columns=[f'COMP {d}' for d in DIRS],
-    )
-    return df_matrix, len(ex)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: PI Distribution (Zone 6)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_pi_distribution(df, scope='Overall'):
-    """PI bucket distribution Prev vs Cur. Existing SKU only."""
-    if scope != 'Overall':
-        df_scope = df[df['pricing_bl_25'] == scope].copy()
-    else:
-        df_scope = df.copy()
-
-    ex = df_scope[df_scope['sku_type'] == 'Existing']
-    n = len(ex)
-    if n == 0:
-        return pd.DataFrame()
-
-    rows = []
-    for lbl in PI_BINS_LBL:
-        nc = int((ex['pi_group_prev'].astype(str) == lbl).sum())
-        nn = int((ex['pi_group_cur'].astype(str) == lbl).sum())
-        rows.append({
-            'PI Bucket': lbl,
-            'n Prev':    nc,
-            'n Cur':     nn,
-            'Δ Count':   nn - nc,
-            '% Prev':    nc/n if n > 0 else 0,
-            '% Cur':     nn/n if n > 0 else 0,
-            'Δ %':       (nn - nc)/n if n > 0 else 0,
-        })
-    return pd.DataFrame(rows)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Top Movers SKU (Zone 7)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_top_movers_pi(df, n=30):
-    """Top N gainers + losers by absolute |diff_pi|."""
-    ex = df[df['sku_type'] == 'Existing'].dropna(subset=['diff_pi']).copy()
-    if len(ex) == 0:
-        return pd.DataFrame(), pd.DataFrame()
-
-    gainers = ex.nlargest(n, 'diff_pi')
-    losers = ex.nsmallest(n, 'diff_pi')
-    return gainers, losers
-
-
-def fmt_mover_row(r, idx):
-    """Format single row for mover table display.
-    Each dimension (Price, Comp, COGS) has 3 separate columns: P1, P2, Δ%.
-    """
-    pi_p1 = r.get('pi', np.nan)
-    pi_p2 = r.get('next_pi', np.nan)
-    mgn_p1 = r.get('margin_pct_prev', np.nan)
-    mgn_p2 = r.get('margin_pct_cur', np.nan)
-
-    # Price before/after
-    price_p1 = r.get('price', np.nan)
-    price_p2 = r.get('next_price', np.nan)
-    price_diff_pct = ((price_p2 - price_p1) / price_p1) if (pd.notna(price_p1) and pd.notna(price_p2) and price_p1 != 0) else np.nan
-
-    # Competitor BLENDED price before/after
-    comp_p1 = r.get('comp_price', np.nan)
-    comp_p2 = r.get('next_comp_price', np.nan)
-    comp_diff_pct = ((comp_p2 - comp_p1) / comp_p1) if (pd.notna(comp_p1) and pd.notna(comp_p2) and comp_p1 != 0) else np.nan
-
-    # COGS before/after
-    cogs_p1 = r.get('cogs', np.nan)
-    cogs_p2 = r.get('next_cogs', np.nan)
-    cogs_diff_pct = ((cogs_p2 - cogs_p1) / cogs_p1) if (pd.notna(cogs_p1) and pd.notna(cogs_p2) and cogs_p1 != 0) else np.nan
-
-    def fmt_n(v):
-        return f"{v:,.0f}" if pd.notna(v) else "—"
+    # sums needed for exact contribution calc
+    sum_pi_ex  = ex["pi"].sum()           if n_ex  > 0 else 0.0
+    sum_pi_cur = pd.concat([ex,dep])["pi"].sum() if n_cur > 0 else 0.0
+    sum_npi_ex = ex["next_pi"].sum()      if n_ex  > 0 else 0.0
+    sum_npi_new= new["next_pi"].sum()     if n_new > 0 else 0.0
 
     return {
-        '#': idx,
-        'Product': str(r.get('product_name', '—'))[:35],
-        'BL': r.get('pricing_bl_25', '—'),
-        'L1': r.get('l1_category_name', '—'),
-        'PI P1 → P2': f"{pi_p1:.1f} → {pi_p2:.1f}" if pd.notna(pi_p1) and pd.notna(pi_p2) else "—",
-        'Δ PI': r.get('diff_pi', 0),
-        # Price (3 cols)
-        'Price P1':    fmt_n(price_p1),
-        'Price P2':    fmt_n(price_p2),
-        'Price Δ%':    price_diff_pct,
-        # Comp Blended (3 cols)
-        'Comp P1':     fmt_n(comp_p1),
-        'Comp P2':     fmt_n(comp_p2),
-        'Comp Δ%':     comp_diff_pct,
-        # COGS (3 cols)
-        'COGS P1':     fmt_n(cogs_p1),
-        'COGS P2':     fmt_n(cogs_p2),
-        'COGS Δ%':     cogs_diff_pct,
+        "A":A,"B":B,"C":C,"D":D,"E":E,
+        "eff_dep":eff_dep,"eff_price":ep,"eff_comp":ec,
+        "eff_normal_comp":enc,"eff_discount_comp":edc,
+        "eff_new":en,
+        "total":(E-A) if not (np.isnan(E) or np.isnan(A)) else 0.0,
+        "n_ex":n_ex,"n_dep":n_dep,"n_new":n_new,"n_cur":n_cur,"n_next":n_nxt,
+        "sum_pi_ex":sum_pi_ex,"sum_pi_cur":sum_pi_cur,
+        "sum_npi_ex":sum_npi_ex,"sum_npi_new":sum_npi_new,
+        "sum_ep":s["ep"].sum() if n_ex>0 else 0.0,
+        "sum_ec":s["ec"].sum() if n_ex>0 else 0.0,
+        "sum_enc":s["enc"].sum() if n_ex>0 else 0.0,
+        "sum_edc":s["edc"].sum() if n_ex>0 else 0.0,
+    }
+
+# ─────────────────────────────────────────────
+# EXACT CONTRIBUTION  (fixed formula)
+# ─────────────────────────────────────────────
+def exact_contributions(seg_res, overall):
+    """
+    For price/comp/int: contrib_seg = sum_effect_seg / n_ex_total
+    For departing:      contrib_seg = sum_pi_ex_seg/n_ex_total - sum_pi_cur_seg/n_cur_total
+    For new:            contrib_seg = (sum_npi_ex_seg + sum_npi_new_seg)/n_next_total
+                                      - sum_npi_ex_seg/n_ex_total
+    All three sum exactly to overall effect.
+    """
+    segs   = ["Dry","Fresh","Frozen"]
+    n_ex   = overall["n_ex"]
+    n_cur  = overall["n_cur"]
+    n_nxt  = overall["n_next"]
+
+    contribs = {}
+    for seg in segs:
+        r = seg_res[seg]
+        # price / comp
+        cp  = r["sum_ep"]  / n_ex  if n_ex > 0 else 0
+        cc  = r["sum_ec"]  / n_ex  if n_ex > 0 else 0
+        cnc = r["sum_enc"] / n_ex  if n_ex > 0 else 0
+        cdc = r["sum_edc"] / n_ex  if n_ex > 0 else 0
+
+        # departing  (exact)
+        cd = (r["sum_pi_ex"]  / n_ex  if n_ex  > 0 else 0) \
+           - (r["sum_pi_cur"] / n_cur if n_cur > 0 else 0)
+
+        # new SKU  (exact)
+        cn = ((r["sum_npi_ex"] + r["sum_npi_new"]) / n_nxt if n_nxt > 0 else 0) \
+           - (r["sum_npi_ex"] / n_ex if n_ex > 0 else 0)
+
+        contribs[seg] = {
+            "eff_dep":            cd,
+            "eff_price":          cp,
+            "eff_comp":           cc,
+            "eff_normal_comp":    cnc,
+            "eff_discount_comp":  cdc,
+            "eff_new":            cn,
+        }
+
+    # Verify sums
+    for eff in ["eff_dep","eff_price","eff_comp","eff_normal_comp","eff_discount_comp","eff_new"]:
+        s = sum(contribs[seg][eff] for seg in segs)
+        ov = overall[eff]
+        residual = abs(s - ov)
+        if residual > 0.0001:
+            print(f"  ⚠️  Residual {eff}: {residual:.6f}")
+
+    return contribs
+
+# ─────────────────────────────────────────────
+# PRE-COMPUTE ALL AGGREGATES FOR SHEET 1B
+# ─────────────────────────────────────────────
+def precompute(d):
+    print("⏳  Pre-computing aggregates ...")
+    t0     = time.time()
+    segs   = ["Dry","Fresh","Frozen"]
+    ov     = decompose(d)
+    sr     = {s: decompose(d[d["pricing_bl_25"]==s]) for s in segs}
+    contribs = exact_contributions(sr, ov)
+
+    # weights
+    for s in segs:
+        r = sr[s]
+        r["w_ex"]  = r["n_ex"]  / ov["n_ex"]  if ov["n_ex"]  > 0 else 0
+        r["w_cur"] = r["n_cur"] / ov["n_cur"]  if ov["n_cur"] > 0 else 0
+        r["w_nxt"] = r["n_ex"]  / ov["n_next"] if ov["n_next"]> 0 else 0
+
+    print(f"✅  Aggregates ready ({time.time()-t0:.1f}s)")
+    return ov, sr, contribs
+
+# ─────────────────────────────────────────────
+# SHEET 1 — RAW DATA  (batch write)
+# ─────────────────────────────────────────────
+def build_s1(wb, d, period_col, next_col):
+    print("\n⏳  Sheet 1 — Raw Data ...")
+    t0 = time.time()
+    ws = wb.active
+    ws.title = "1. Raw Data"
+
+    # Column order — renamed to prev/current
+    cols_order = [
+        period_col, next_col,
+        "product_id","product_name","l1_category_name",
+        "pricing_bl_25","pareto_classification","source_status","sku_type",
+        "framework_check",
+        # Price
+        "price","next_price","diff_price","diff_price_pct","price_status",
+        # COGS
+        "cogs","next_cogs","diff_cogs","diff_cogs_pct","cogs_status",
         # Margin
-        'Mgn P1 → P2': f"{mgn_p1*100:.1f}% → {mgn_p2*100:.1f}%" if pd.notna(mgn_p1) and pd.notna(mgn_p2) else "—",
-        # Effects
-        'Price Eff':       r.get('eff_price', 0),
-        'Comp Price Eff':  r.get('eff_comp', 0),
-        'Normal Comp Eff': r.get('eff_normal_comp', 0),
-        'Discount Comp Eff': r.get('eff_discount_comp', 0),
-        'Framework':       r.get('framework_check', '') or '',
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Framework Check (Zone 9)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_framework_check_table(df):
-    """Filter SKU where framework_check == 'TRUE' and classify by rule."""
-    fc = df[df['framework_check'] == 'TRUE'].copy()
-    if len(fc) == 0:
-        return pd.DataFrame()
-
-    # Classify rule based on conditions
-    def classify_rule(row):
-        bl = row.get('pricing_bl_25', '')
-        pi = row.get('next_pi', np.nan)
-        mg = row.get('margin_pct_cur', np.nan)
-        if pd.isna(pi) or pd.isna(mg):
-            return 'Unknown'
-        if bl == 'Fresh':
-            if pi > 110 and mg <= 0.15: return 'Rule 1: Fresh PI>110 + Margin≤15% (room to drop price)'
-            if pi > 120 and mg >= 0.70: return 'Rule 3: Fresh PI>120 + Margin≥70% (over-priced premium)'
-        elif bl == 'Frozen':
-            if pi > 100 and mg <= 0.15: return 'Rule 2: Frozen PI>100 + Margin≤15% (room to drop)'
-        elif bl == 'Dry':
-            if pi < 105 and mg <= 0.00: return 'Rule 4: Dry PI<105 + Margin≤0% (loss leader, raise)'
-            if pi > 120 and mg > 0.40: return 'Rule 5: Dry PI>120 + Margin>40% (over-priced, drop)'
-        return 'Other'
-
-    fc['Rule'] = fc.apply(classify_rule, axis=1)
-
-    cols = ['Rule', 'product_id', 'product_name', 'pricing_bl_25', 'l1_category_name',
-            'pi', 'next_pi', 'diff_pi', 'margin_pct_prev', 'margin_pct_cur',
-            'price', 'next_price', 'cogs', 'next_cogs', 'comp_price', 'next_comp_price']
-    cols = [c for c in cols if c in fc.columns]
-    out = fc[cols].sort_values(['Rule', 'next_pi'], ascending=[True, False]).reset_index(drop=True)
-    return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILDER: Structural Loss (Zone 8a) + COGS Need Improve (Zone 8b)
-# ─────────────────────────────────────────────────────────────────────────────
-def build_structural_loss(df):
-    """L1 categories with high CI Group D (95-105) or E (>105)."""
-    ex = df[df['ci_cur'].notna() & df['next_pi'].notna() & df['margin_pct_cur'].notna()].copy()
-    if len(ex) == 0:
-        return pd.DataFrame()
-
-    cat_total = ex.groupby('l1_category_name').size().to_dict()
-    rows = []
-    for grp_label, grp_filter in [
-        ('COGS Index D (95-105)', 'D.95-105'),
-        ('COGS Index E (>105)',   'E.>105'),
-    ]:
-        sub = ex[ex['ci_group_cur'] == grp_filter]
-        if len(sub) == 0:
-            continue
-        by_cat = sub.groupby('l1_category_name').agg(
-            n_sku=('product_id', 'count'),
-            avg_ci=('ci_cur', 'mean'),
-            avg_mg=('margin_pct_cur', 'mean'),
-            avg_pi=('next_pi', 'mean')
-        ).sort_values('n_sku', ascending=False).reset_index()
-        for _, row in by_cat.iterrows():
-            pct = row['n_sku'] / cat_total.get(row['l1_category_name'], 1)
-            rows.append({
-                'CI Group': grp_label,
-                'L1 Category': row['l1_category_name'],
-                'n SKU': int(row['n_sku']),
-                '% of Category': pct,
-                'Avg COGS Index': row['avg_ci'],
-                'Avg Margin %': row['avg_mg'],
-                'Avg PI (Cur)': row['avg_pi'],
-            })
-
-    return pd.DataFrame(rows)
-
-
-def build_cogs_need_improve(df):
-    """SKU list with CI Group D or E. Sorted by CI desc."""
-    ex = df[df['ci_group_cur'].isin(['D.95-105', 'E.>105'])].copy()
-    if len(ex) == 0:
-        return pd.DataFrame()
-    ex = ex.sort_values('ci_cur', ascending=False)
-    cols = ['product_id', 'product_name', 'l1_category_name', 'pricing_bl_25',
-            'pareto_classification', 'sku_type',
-            'ci_group_cur', 'ci_cur', 'next_pi', 'margin_pct_cur',
-            'next_price', 'next_cogs', 'next_comp_price']
-    cols = [c for c in cols if c in ex.columns]
-    return ex[cols].reset_index(drop=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SESSION STATE
-# ─────────────────────────────────────────────────────────────────────────────
-if 'pi_analysis' not in st.session_state:
-    st.session_state.pi_analysis = None
-if 'pi_file_bytes' not in st.session_state:
-    st.session_state.pi_file_bytes = None
-if 'pi_uploaded_file_name' not in st.session_state:
-    st.session_state.pi_uploaded_file_name = None
-if 'pi_uploaded_file_size' not in st.session_state:
-    st.session_state.pi_uploaded_file_size = None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────────────────────────────────────
-col_title, col_clear = st.columns([5, 1])
-with col_title:
-    st.title("📈 PI Analyzer")
-    st.caption("Pricing Index Movement Decomposition vs Competitor — Astro Pricing Strategy")
-with col_clear:
-    st.write("")
-    if st.session_state.pi_analysis is not None:
-        if st.button("🗑️ Clear data", type="secondary", use_container_width=True, key='pi_clear'):
-            st.session_state.pi_analysis = None
-            st.session_state.pi_file_bytes = None
-            st.session_state.pi_uploaded_file_name = None
-            st.session_state.pi_uploaded_file_size = None
-            st.session_state.pi_excel_ready = False
-            if 'pi_excel_bytes' in st.session_state:
-                del st.session_state.pi_excel_bytes
-            st.rerun()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ZONE 1 — UPLOAD
-# ═══════════════════════════════════════════════════════════════════════════
-st.markdown('<div class="section-header">📁 Upload Data</div>', unsafe_allow_html=True)
-
-up_col1, up_col2 = st.columns([3, 1])
-with up_col1:
-    uploaded = st.file_uploader(
-        "Upload file Excel atau CSV (raw input per-SKU per-periode)",
-        type=['xlsx', 'xls', 'csv'],
-        help=f"Format mengikuti pi_analyzer_v1.py. Required columns: {', '.join(REQUIRED_COLS[:8])}...",
-        key='pi_uploader',
-    )
-with up_col2:
-    st.write("")
-    st.write("")
-    template_bytes = make_template_pi_excel()
-    st.download_button(
-        "📥 Download Template",
-        data=template_bytes,
-        file_name="pi_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key='pi_template_download',
-    )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PROCESS UPLOAD
-# ─────────────────────────────────────────────────────────────────────────────
-file_changed = (
-    uploaded is not None and
-    (st.session_state.pi_uploaded_file_name != uploaded.name or
-     st.session_state.pi_uploaded_file_size != uploaded.size or
-     st.session_state.pi_analysis is None)
-)
-
-if file_changed:
-    # Read file bytes ONCE for caching (read once, use everywhere)
-    file_bytes = uploaded.getvalue()
-    try:
-        if uploaded.name.lower().endswith('.csv'):
-            df_input = pd.read_csv(io.BytesIO(file_bytes))
-        else:
-            df_input = pd.read_excel(io.BytesIO(file_bytes))
-    except Exception as e:
-        st.error(f"❌ Gagal load file: {e}")
-        st.stop()
-
-    # Validation panel
-    st.markdown("### ✅ Validation")
-    cols_in = list(df_input.columns)
-
-    val_col1, val_col2 = st.columns(2)
-    with val_col1:
-        st.markdown(f"**File:** `{uploaded.name}`")
-        st.markdown(f"**Rows:** {len(df_input):,}")
-        st.markdown(f"**Cols:** {len(cols_in)}")
-
-        # Period detection
-        period_pair = None
-        for p1c, p2c in PERIOD_PAIRS:
-            if p1c in cols_in and p2c in cols_in:
-                period_pair = (p1c, p2c)
-                break
-        if period_pair:
-            try:
-                p1_val = str(df_input[period_pair[0]].dropna().iloc[0])[:10]
-                p2_val = str(df_input[period_pair[1]].dropna().iloc[0])[:10]
-                st.success(f"✅ Period: `{period_pair[0]}` ({p1_val}) vs `{period_pair[1]}` ({p2_val})")
-            except Exception:
-                st.warning(f"⚠️ Period cols ada tapi nilai tidak terbaca")
-        else:
-            st.error(f"❌ Period cols tidak ditemukan. Butuh: {PERIOD_PAIRS}")
-            st.stop()
-
-    with val_col2:
-        # Required column check
-        missing = [c for c in REQUIRED_COLS if c not in cols_in]
-        if missing:
-            st.error(f"❌ Missing kolom: `{missing}`")
-            st.stop()
-        else:
-            st.success(f"✅ Semua {len(REQUIRED_COLS)} required columns OK")
-
-    # Process button — FAST path now (cached compute, no Excel build yet)
-    if st.button("🚀 Process Data", type="primary", key='pi_process'):
-        with st.spinner("Running PI analysis (fast path)..."):
-            try:
-                result = cached_pi_compute(file_bytes, uploaded.name)
-            except Exception as e:
-                st.error(f"❌ Analyze error: {e}")
-                st.exception(e)
-                st.stop()
-
-            st.session_state.pi_analysis = result
-            st.session_state.pi_file_bytes = file_bytes  # for lazy Excel
-            st.session_state.pi_uploaded_file_name = uploaded.name
-            st.session_state.pi_uploaded_file_size = uploaded.size
-            st.success(f"✅ Selesai! {len(result['df_enriched']):,} rows processed.")
-            st.rerun()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN DASHBOARD (only if analysis available)
-# ═══════════════════════════════════════════════════════════════════════════
-if st.session_state.pi_analysis is not None:
-    result = st.session_state.pi_analysis
-    df = result['df_enriched']
-    overall = result['overall']
-    segments = result['segments']
-    contribs = result['contribs']
-    period_p1 = result['period_p1']
-    period_p2 = result['period_p2']
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # HASIL ANALISIS HEADER
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown(f'<div class="section-header">📈 Hasil Analisis — {period_p1} vs {period_p2}</div>',
-                unsafe_allow_html=True)
-    st.markdown(f"📌 File: `{st.session_state.pi_uploaded_file_name}` · {len(df):,} SKU diproses")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 2 — EXECUTIVE SUMMARY (KPI Cards)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">2️⃣ Executive Summary</div>', unsafe_allow_html=True)
-
-    # Compute KPIs
-    pi_a = overall['A']
-    pi_e = overall['E']
-    pi_delta = overall['total']
-    n_ex = overall['n_ex']
-    n_dep = overall['n_dep']
-    n_new = overall['n_new']
-
-    # ── Margin: P1 vs P2 (avg over Existing SKU) ──
-    ex_only = df[df['sku_type'] == 'Existing']
-    avg_margin_p1 = ex_only['margin_pct_prev'].mean() if 'margin_pct_prev' in ex_only.columns else np.nan
-    avg_margin_p2 = ex_only['margin_pct_cur'].mean()  if 'margin_pct_cur'  in ex_only.columns else np.nan
-    margin_delta_pp = (avg_margin_p2 - avg_margin_p1) if (pd.notna(avg_margin_p1) and pd.notna(avg_margin_p2)) else np.nan
-
-    # ── Action SKU counts ──
-    n_framework = int((df['framework_check'] == 'TRUE').sum())
-    n_cogs_improve = int(df['ci_group_cur'].isin(['D.95-105', 'E.>105']).sum())
-
-    # ── PI Distribution: Premium / Match / Undercut, P1 vs P2 ──
-    #   Premium = D, E, F (PI > 105 - includes D for >105)
-    #   Match = B, C (95 - 105)
-    #   Undercut = A (< 95)
-    PREMIUM_BUCKETS = ['D.105-110', 'E.110-120', 'F.>120']
-    MATCH_BUCKETS   = ['B.95-<100', 'C.100-105']
-    UNDERCUT_BUCKETS = ['A.<95']
-
-    n_ex_total = len(ex_only) if len(ex_only) > 0 else 1
-
-    n_prem_p2  = int(ex_only['pi_group_cur'].isin(PREMIUM_BUCKETS).sum())
-    n_match_p2 = int(ex_only['pi_group_cur'].isin(MATCH_BUCKETS).sum())
-    n_under_p2 = int(ex_only['pi_group_cur'].isin(UNDERCUT_BUCKETS).sum())
-
-    n_prem_p1  = int(ex_only['pi_group_prev'].isin(PREMIUM_BUCKETS).sum())
-    n_match_p1 = int(ex_only['pi_group_prev'].isin(MATCH_BUCKETS).sum())
-    n_under_p1 = int(ex_only['pi_group_prev'].isin(UNDERCUT_BUCKETS).sum())
-
-    # Convert to % of Existing
-    pct_prem_p1 = n_prem_p1 / n_ex_total * 100
-    pct_prem_p2 = n_prem_p2 / n_ex_total * 100
-    pct_match_p1 = n_match_p1 / n_ex_total * 100
-    pct_match_p2 = n_match_p2 / n_ex_total * 100
-    pct_under_p1 = n_under_p1 / n_ex_total * 100
-    pct_under_p2 = n_under_p2 / n_ex_total * 100
-
-    # ── Row 1: PI Current, Total Δ PI, Avg Margin (with delta) ──
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(kpi_card(
-            "Avg PI Current (E)",
-            fmt_pi(pi_e),
-            delta=pi_delta,
-            delta_label=fmt_pi_delta(pi_delta),
-            sub=f"P1 (A): {fmt_pi(pi_a)}"
-        ), unsafe_allow_html=True)
-    with c2:
-        total_abs = abs(overall['eff_dep']) + abs(overall['eff_price']) + abs(overall['eff_comp']) + abs(overall['eff_new'])
-        st.markdown(kpi_card(
-            "Total Δ PI",
-            fmt_pi_delta(pi_delta),
-            sub=f"Sum |effects| = {total_abs:.3f}"
-        ), unsafe_allow_html=True)
-    with c3:
-        # Margin delta in percentage points (pp)
-        if pd.notna(margin_delta_pp):
-            delta_label_str = f"{margin_delta_pp*100:+.2f} pp"
-            sub_str = f"P1: {avg_margin_p1*100:.2f}%"
-        else:
-            delta_label_str = None
-            sub_str = "Avg over SKU Existing"
-        st.markdown(kpi_card(
-            "Avg Margin % (Existing)",
-            fmt_pct(avg_margin_p2) if pd.notna(avg_margin_p2) else "—",
-            delta=margin_delta_pp if pd.notna(margin_delta_pp) else None,
-            delta_label=delta_label_str,
-            sub=sub_str
-        ), unsafe_allow_html=True)
-
-    # ── Row 2: SKU counts (Existing / New / Departing) ──
-    c4, c5, c6 = st.columns(3)
-    with c4:
-        st.markdown(kpi_card(
-            "# SKU Existing",
-            fmt_count(n_ex),
-            sub=f"Punya PI di P1 dan P2"
-        ), unsafe_allow_html=True)
-    with c5:
-        st.markdown(kpi_card(
-            "# SKU New",
-            fmt_count(n_new),
-            sub=f"Muncul di P2 only"
-        ), unsafe_allow_html=True)
-    with c6:
-        st.markdown(kpi_card(
-            "# SKU Departing",
-            fmt_count(n_dep),
-            sub=f"Ada di P1, hilang di P2"
-        ), unsafe_allow_html=True)
-
-    # ── Row 3: Action SKU + spacer ──
-    c7, c8, c9 = st.columns(3)
-    with c7:
-        st.markdown(kpi_card(
-            "🚨 Framework Triggered",
-            fmt_count(n_framework),
-            sub="SKU butuh repricing action"
-        ), unsafe_allow_html=True)
-    with c8:
-        st.markdown(kpi_card(
-            "⚠️ COGS Need Improve",
-            fmt_count(n_cogs_improve),
-            sub="CI Group D (95-105) atau E (>105)"
-        ), unsafe_allow_html=True)
-    with c9:
-        st.markdown(kpi_card(
-            "📦 Total SKU Existing (base)",
-            fmt_count(n_ex_total),
-            sub="Base of PI Distribution di bawah"
-        ), unsafe_allow_html=True)
-
-    # ── Row 4: PI Distribution (3 cards) — Premium / Match / Undercut, P1 → P2 ──
-    st.markdown('<div style="margin-top: 8px; margin-bottom: 4px; font-size: 13px; color: #6B7280; font-weight: 600;">📊 PI POSITIONING (% of Existing SKU) — P1 → P2</div>', unsafe_allow_html=True)
-    c10, c11, c12 = st.columns(3)
-
-    with c10:
-        d_prem = pct_prem_p2 - pct_prem_p1
-        # Premium: lebih mahal = bad direction kalau naik (delta_inverse=True)
-        st.markdown(kpi_card(
-            "🔴 SKU Premium Priced",
-            f"{pct_prem_p2:.1f}%",
-            delta=d_prem,
-            delta_label=f"{d_prem:+.1f} pp",
-            sub=f"{n_prem_p2:,} SKU di PI > 105 (was {pct_prem_p1:.1f}% / {n_prem_p1:,}) · butuh repricing review",
-            delta_inverse=True
-        ), unsafe_allow_html=True)
-    with c11:
-        d_match = pct_match_p2 - pct_match_p1
-        # Match: neutral position
-        st.markdown(kpi_card(
-            "🟡 SKU Match Comp",
-            f"{pct_match_p2:.1f}%",
-            delta=d_match,
-            delta_label=f"{d_match:+.1f} pp",
-            sub=f"{n_match_p2:,} SKU di PI 95-105 (was {pct_match_p1:.1f}% / {n_match_p1:,})"
-        ), unsafe_allow_html=True)
-    with c12:
-        d_under = pct_under_p2 - pct_under_p1
-        # Undercut: lebih murah dari comp. Naik = lebih kompetitif (bisa juga over-discount)
-        st.markdown(kpi_card(
-            "🟢 SKU Undercut Comp",
-            f"{pct_under_p2:.1f}%",
-            delta=d_under,
-            delta_label=f"{d_under:+.1f} pp",
-            sub=f"{n_under_p2:,} SKU di PI < 95 (was {pct_under_p1:.1f}% / {n_under_p1:,}) · loss leader / advantage"
-        ), unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 3 — PI DECOMPOSITION (Tornado + Tabel 1 + Tabel 2)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">3️⃣ PI Decomposition (Shapley)</div>', unsafe_allow_html=True)
-
-    # Narrative
-    direction = "naik" if pi_delta > 0 else "turun"
-    # Top driver
-    drivers = [
-        ('1. Churned SKU', overall['eff_dep']),
-        ('2. Price Change Effect', overall['eff_price']),
-        ('3. Comp Effect', overall['eff_comp']),
-        ('4. New SKU', overall['eff_new']),
+        "margin_prev","margin_cur","diff_margin","diff_margin_pct",
+        "margin_pct_prev","margin_pct_cur",
+        # Normal Comp Price
+        "normal_comp_price","next_normal_comp_price","diff_normal_comp",
+        # Discount Comp Price
+        "discount_comp_price","next_discount_comp_price","diff_discount_comp",
+        # Comp (effective / discounted)
+        "comp_price","next_comp_price","diff_comp","diff_comp_pct","comp_status",
+        # PI
+        "pi","next_pi","diff_pi","diff_pi_pct",
+        # Effects (existing SKU only)
+        "eff_price","eff_comp","eff_normal_comp","eff_discount_comp",
+        # COGS Index
+        "ci_prev","ci_cur",
+        # Groups
+        "pi_group_prev","pi_group_cur",
+        "ci_group_prev","ci_group_cur",
+        "margin_group_prev","margin_group_cur",
+        # Tags
+        "price_tag","cogs_tag","comp_tag",
     ]
-    top_driver = max(drivers, key=lambda x: abs(x[1]))
-    st.markdown(f"""
-    PI overall **{direction}** dari **{pi_a:.2f}** ke **{pi_e:.2f}** (Δ **{pi_delta:+.3f}**).
-    Driver utama: **{top_driver[0]}** ({top_driver[1]:+.3f}).
-    Comp effect breakdown — Normal: **{overall['eff_normal_comp']:+.3f}**, Blended (Discount): **{overall['eff_discount_comp']:+.3f}**.
-    """)
+    cols_order = [c for c in cols_order if c in d.columns]
 
-    # Scope filter for tornado
-    scope_t = st.radio(
-        "Scope:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_zone3_scope'
-    )
-    if scope_t == 'Overall':
-        decomp_for_chart = overall
-    else:
-        decomp_for_chart = segments[scope_t]
-
-    fig_tornado = make_pi_tornado(decomp_for_chart, scope_label=scope_t)
-    st.plotly_chart(fig_tornado, use_container_width=True)
-
-    # Tabel 1: Per-segment decomposition
-    st.markdown("##### 📊 Tabel 1: PI Decomposition per Segment")
-    st.caption("Step-by-step PI movement per segment. Sum dari 5 effect = Total Δ (math identity exact via Shapley).")
-
-    t1 = build_pi_decomp_table(overall, segments, contribs)
-    seg_cols = ['Overall', 'Dry', 'Fresh', 'Frozen']
-    # Format display
-    def fmt_t1_row(row):
-        label = row['Step']
-        is_baseline = 'Baseline' in label or 'Result' in label
-        out = {'Step': label}
-        for c in seg_cols:
-            v = row[c]
-            if is_baseline:
-                out[c] = f"{v:.4f}" if pd.notna(v) else "—"
-            else:
-                out[c] = f"{v:+.4f}" if pd.notna(v) else "—"
-        return out
-    t1_display = pd.DataFrame([fmt_t1_row(r) for _, r in t1.iterrows()])
-
-    # Color the effect rows
-    def style_t1(orig, disp):
-        # Compute vmax from non-baseline rows
-        effect_mask = ~orig['Step'].str.contains('Baseline|Result', regex=True)
-        vals = orig.loc[effect_mask, seg_cols].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-
-        def apply_row(row):
-            label = row['Step']
-            is_baseline = ('Baseline' in label) or ('Result' in label)
-            is_total = 'Total Δ' in label
-            styles = []
-            for col in disp.columns:
-                if col == 'Step':
-                    if is_baseline:
-                        styles.append('background-color: #F3F4F6; font-weight: 700;')
-                    elif is_total:
-                        styles.append('background-color: #DBEAFE; font-weight: 700;')
-                    elif label.startswith('    '):
-                        styles.append('padding-left: 24px;')
-                    else:
-                        styles.append('')
-                else:
-                    if is_baseline:
-                        styles.append('background-color: #F3F4F6; font-weight: 700;')
-                    elif is_total:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax) + ' font-weight: 700;')
-                    else:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax))
-            return styles
-        return disp.style.apply(apply_row, axis=1)
-
-    st.dataframe(style_t1(t1, t1_display), use_container_width=True, hide_index=True)
-
-    # Tabel 2: Per-segment contribution to OVERALL
-    st.markdown("##### 📊 Tabel 2: Segment Contribution to Overall (Exact Math Identity)")
-    st.caption("Σ Dry + Fresh + Frozen = Overall (exact, zero residual). Methodology: exact_contributions formula.")
-
-    t2 = build_pi_contrib_table(overall, contribs)
-    t2_cols = ['Dry contrib', 'Fresh contrib', 'Frozen contrib', 'Overall (sum)', 'Overall actual']
-
-    def fmt_t2_row(row):
-        out = {'Effect': row['Effect']}
-        is_ref = row['Effect'] in ('Overall PI Prev (A)', 'Overall PI Cur (E)')
-        for c in t2_cols:
-            if pd.isna(row[c]):
-                out[c] = "—"
-            elif is_ref:
-                # Reference rows: PI value (not delta, not signed)
-                out[c] = f"{row[c]:.4f}"
-            else:
-                # Effect & Total rows: signed delta format
-                out[c] = f"{row[c]:+.4f}"
-        return out
-    t2_display = pd.DataFrame([fmt_t2_row(r) for _, r in t2.iterrows()])
-
-    def style_t2(orig, disp):
-        # vmax from EFFECT rows only (exclude reference + Total Δ to keep contrast)
-        effect_mask = ~orig['Effect'].isin(['Overall PI Prev (A)', 'Overall PI Cur (E)', 'Total Δ'])
-        vals = orig.loc[effect_mask, t2_cols].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-
-        def apply_row(row):
-            label = orig.loc[row.name, 'Effect']
-            is_ref = label in ('Overall PI Prev (A)', 'Overall PI Cur (E)')
-            is_total = label == 'Total Δ'
-            styles = []
-            for col in disp.columns:
-                if col == 'Effect':
-                    if is_ref:
-                        styles.append('background-color: #F3F4F6; font-weight: 700;')
-                    elif is_total:
-                        styles.append('background-color: #DBEAFE; font-weight: 700;')
-                    else:
-                        styles.append('')
-                else:
-                    if is_ref:
-                        # Highlight only Overall actual cell, dim others
-                        if col == 'Overall actual':
-                            styles.append('background-color: #DBEAFE; font-weight: 700;')
-                        else:
-                            styles.append('background-color: #F3F4F6; color: #9CA3AF;')
-                    elif is_total:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax) + ' font-weight: 700;')
-                    else:
-                        v = orig.loc[row.name, col]
-                        styles.append(gradient_color(v, vmax))
-            return styles
-        return disp.style.apply(apply_row, axis=1)
-
-    st.dataframe(style_t2(t2, t2_display), use_container_width=True, hide_index=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 4 — L1 CATEGORY BREAKDOWN
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">4️⃣ L1 Category Movement</div>', unsafe_allow_html=True)
-    st.caption("PI movement per L1 category dengan 5-component decomposition.")
-
-    l1_scope = st.radio(
-        "Scope L1:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_l1_scope'
-    )
-    l1_table = build_l1_pi_table(df, scope=l1_scope)
-    if l1_table.empty:
-        st.info("Tidak ada data L1 untuk scope ini.")
-    else:
-        # Format columns
-        l1_display = l1_table.copy()
-        for c in ['Avg PI Prev (A)', 'Avg PI Cur (E)']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
-        for c in ['Total Δ', 'Driver Value', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                  '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{v:+.3f}" if pd.notna(v) else "—")
-        for c in ['n Existing', 'n Departing', 'n New']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "—")
-        for c in ['Margin % P1', 'Margin % P2']:
-            l1_display[c] = l1_display[c].apply(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "—")
-        l1_display['Margin Δ pp'] = l1_display['Margin Δ pp'].apply(
-            lambda v: f"{v*100:+.2f} pp" if pd.notna(v) else "—"
-        )
-
-        # Reorder columns to put Driver + Margin right after Total Δ
-        col_order = ['L1 Category', 'BL (sample)',
-                     'n Existing', 'n Departing', 'n New',
-                     'Avg PI Prev (A)', 'Avg PI Cur (E)', 'Total Δ',
-                     'Driver', 'Driver Value',
-                     'Margin % P1', 'Margin % P2', 'Margin Δ pp',
-                     '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                     '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']
-        col_order = [c for c in col_order if c in l1_display.columns]
-        l1_display = l1_display[col_order]
-
-        # Gradient on effect columns
-        effect_cols_l1 = ['Total Δ', 'Driver Value', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                         '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']
-        vals = l1_table[[c for c in effect_cols_l1 if c in l1_table.columns]].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-
-        # Margin gradient
-        mg_vals = l1_table['Margin Δ pp'].dropna().values
-        mg_vmax = max(abs(v) for v in mg_vals) if len(mg_vals) > 0 else 0.05
-        if mg_vmax == 0: mg_vmax = 0.05
-
-        def apply_l1_style(row):
-            styles = []
-            for col in l1_display.columns:
-                if col in effect_cols_l1:
-                    v = l1_table.loc[row.name, col]
-                    styles.append(gradient_color(v, vmax))
-                elif col == 'Margin Δ pp':
-                    v = l1_table.loc[row.name, col]
-                    styles.append(gradient_color(v, mg_vmax))
-                elif col == 'Driver':
-                    # color driver name pill
-                    styles.append('background-color: #F3F4F6; font-weight: 600;')
-                else:
-                    styles.append('')
-            return styles
-
-        st.markdown(f"**Scope: {l1_scope}** · {len(l1_display)} L1 categories (sorted by Total Δ desc)")
-        st.caption("💡 **Driver** = effect dengan magnitude terbesar yang punya sign sama dengan Total Δ. "
-                  "Untuk L1 dengan Total Δ positif: driver = effect yang push PI naik. Negatif: driver = effect yang push PI turun.")
-        st.dataframe(
-            l1_display.style.apply(apply_l1_style, axis=1),
-            use_container_width=True, hide_index=True, height=600
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 5 — PRICE × COMP MATRIX
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">5️⃣ Price × Comp Direction Matrix</div>', unsafe_allow_html=True)
-    st.caption("Behavior pattern: SKU yang harga naik/turun vs gerakan kompetitor. Existing SKU only.")
-
-    matrix_scope = st.radio(
-        "Scope Matrix:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_matrix_scope'
-    )
-    matrix_df, n_total = build_price_comp_matrix(df, scope=matrix_scope)
-    if matrix_df is None:
-        st.info("Tidak ada data Existing SKU untuk scope ini.")
-    else:
-        # Display matrix + percentage with view toggle (Amount vs %)
-        col_label, col_view = st.columns([3, 1])
-        with col_label:
-            st.markdown(f"**Scope: {matrix_scope}** · Total {n_total:,} Existing SKU")
-        with col_view:
-            matrix_view = st.radio(
-                "View:",
-                ['Amount (SKU)', '% of Total'],
-                horizontal=False,
-                key='pi_matrix_view',
-                label_visibility='collapsed'
-            )
-
-        # Up/Down/Stay legend (threshold sesuai engine pi_analyzer_v1.py line 182-184)
-        with st.expander("ℹ️ Apa arti Up / Stay / Down? (Threshold)", expanded=False):
-            st.markdown("""
-            **Threshold tagging** (sama untuk Price, COGS, Comp):
-
-            | Tag | Kondisi |
-            |---|---|
-            | **Up** | Δ absolute ≥ **+5,000 IDR** **OR** Δ percent ≥ **+5%** |
-            | **Down** | Δ absolute ≤ **-5,000 IDR** **OR** Δ percent ≤ **-5%** |
-            | **Stay** | selain Up dan Down (Δ < 5,000 IDR dan abs Δ % < 5%) |
-
-            **PRICE direction** = pergerakan harga Astro dari P1 ke P2
-            **COMP direction** = pergerakan harga blended competitor dari P1 ke P2
-
-            **Cell interpretation:**
-            - **Diagonal (Down-Down / Stay-Stay / Up-Up)**: Astro **follow** gerakan competitor — pricing aligned
-            - **Off-diagonal**: Astro **NOT follow** competitor — misaligned
-            - **PRICE Stay × COMP Up**: competitor naik harga, Astro stay → PI Astro turun otomatis (lebih kompetitif), bisa jadi opportunity raise price
-            - **PRICE Stay × COMP Down**: competitor turun harga, Astro stay → PI Astro naik otomatis (uncompetitive), butuh respond
-            """)
-
-        # Count matrix with Total row/col
-        m_count = matrix_df.copy()
-        m_count['Total'] = m_count.sum(axis=1)
-        m_count.loc['TOTAL'] = m_count.sum(axis=0)
-
-        # Pct matrix WITH Total row/col (lo minta ini)
-        m_pct = matrix_df / n_total * 100
-        m_pct['Total'] = m_pct.sum(axis=1)
-        m_pct.loc['TOTAL'] = m_pct.sum(axis=0)
-
-        if matrix_view == 'Amount (SKU)':
-            # Render count matrix
-            max_c = matrix_df.values.max() if matrix_df.values.size > 0 else 1
-            def color_amt(val):
-                if pd.isna(val) or val == 0: return ''
-                # Skip Total cells (they have own styling)
-                alpha = min(1.0, val / max_c) if max_c > 0 else 0
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-
-            # Style: only color non-Total cells
-            def style_count(df_):
-                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
-                for i in df_.index:
-                    for c in df_.columns:
-                        if i != 'TOTAL' and c != 'Total':
-                            styles.loc[i, c] = color_amt(df_.loc[i, c])
-                        else:
-                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
-                return styles
-
-            st.markdown("##### 📊 Count (Amount of SKU)")
-            st.dataframe(
-                m_count.style.format("{:,}").apply(style_count, axis=None),
-                use_container_width=True
-            )
-        else:
-            # Render % matrix
-            max_p = (matrix_df / n_total * 100).values.max() if matrix_df.values.size > 0 else 1
-            def color_pct(val):
-                if pd.isna(val) or val == 0: return ''
-                alpha = min(1.0, val / max_p) if max_p > 0 else 0
-                r = int(255 - (255-22) * alpha)
-                g = int(255 - (255-163) * alpha)
-                b = int(255 - (255-74) * alpha)
-                return f'background-color: rgb({r},{g},{b}); color: #111827;'
-
-            def style_pct(df_):
-                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
-                for i in df_.index:
-                    for c in df_.columns:
-                        if i != 'TOTAL' and c != 'Total':
-                            styles.loc[i, c] = color_pct(df_.loc[i, c])
-                        else:
-                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
-                return styles
-
-            st.markdown("##### 📊 % of Total Existing")
-            st.dataframe(
-                m_pct.style.format("{:.1f}%").apply(style_pct, axis=None),
-                use_container_width=True
-            )
-
-        # Diagonal vs off-diagonal insight
-        diag_sum = sum(matrix_df.iloc[i, i] for i in range(3))
-        st.caption(f"💡 Diagonal (Price follows Comp direction): **{diag_sum:,}** SKU "
-                  f"({diag_sum/n_total*100:.1f}%). "
-                  f"Off-diagonal = misaligned dengan kompetitor.")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 6 — PI DISTRIBUTION
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">6️⃣ PI Distribution & Movement</div>', unsafe_allow_html=True)
-    st.caption("Berapa SKU yang bergerak antar PI bucket. Existing SKU only.")
-
-    dist_scope = st.radio(
-        "Scope Distribution:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_dist_scope'
-    )
-    dist_df = build_pi_distribution(df, scope=dist_scope)
-    if dist_df.empty:
-        st.info("Tidak ada data Existing untuk scope ini.")
-    else:
-        # Bar chart side-by-side Prev vs Cur
-        fig_dist = go.Figure()
-        fig_dist.add_trace(go.Bar(
-            name='Prev',
-            x=dist_df['PI Bucket'],
-            y=dist_df['n Prev'],
-            marker_color='#9CA3AF',
-            text=dist_df['n Prev'].apply(lambda v: f"{int(v):,}"),
-            textposition='outside',
-        ))
-        fig_dist.add_trace(go.Bar(
-            name='Cur',
-            x=dist_df['PI Bucket'],
-            y=dist_df['n Cur'],
-            marker_color='#2563EB',
-            text=dist_df['n Cur'].apply(lambda v: f"{int(v):,}"),
-            textposition='outside',
-        ))
-        fig_dist.update_layout(
-            title=f"PI Bucket Distribution — {dist_scope}",
-            barmode='group',
-            height=400,
-            plot_bgcolor='white',
-            margin=dict(t=60, b=40, l=40, r=20),
-        )
-        fig_dist.update_yaxes(showgrid=True, gridcolor='#F3F4F6')
-        st.plotly_chart(fig_dist, use_container_width=True)
-
-        # Distribution table with delta
-        dist_disp = dist_df.copy()
-        dist_disp['n Prev']  = dist_disp['n Prev'].apply(lambda v: f"{int(v):,}")
-        dist_disp['n Cur']   = dist_disp['n Cur'].apply(lambda v: f"{int(v):,}")
-        dist_disp['Δ Count'] = dist_disp['Δ Count'].apply(lambda v: f"{v:+,}")
-        dist_disp['% Prev']  = dist_disp['% Prev'].apply(lambda v: f"{v*100:.1f}%")
-        dist_disp['% Cur']   = dist_disp['% Cur'].apply(lambda v: f"{v*100:.1f}%")
-        dist_disp['Δ %']     = dist_disp['Δ %'].apply(lambda v: f"{v*100:+.1f}%")
-        st.dataframe(dist_disp, use_container_width=True, hide_index=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 7 — TOP MOVERS SKU
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">7️⃣ Top Movers SKU</div>', unsafe_allow_html=True)
-    st.caption("Top 30 SKU per dimensi mover: PI overall, Price Effect, atau Comp Price Effect. "
-               "Existing SKU only.")
-
-    mover_tabs = st.tabs([
-        "📊 By Δ PI (overall)",
-        "💰 By Price Effect",
-        "🏪 By Comp Price Effect",
-    ])
-
-    fmt_mover = {
-        'Δ PI': '{:+.2f}',
-        'Price Δ%':  '{:+.2%}',
-        'Comp Δ%':   '{:+.2%}',
-        'COGS Δ%':   '{:+.2%}',
-        'Price Eff': '{:+.3f}',
-        'Comp Price Eff': '{:+.3f}',
-        'Normal Comp Eff': '{:+.3f}',
-        'Discount Comp Eff': '{:+.3f}',
+    # Display labels
+    col_labels = {
+        period_col:"Period (Prev)", next_col:"Period (Current)",
+        "product_id":"Product ID","product_name":"Product Name",
+        "l1_category_name":"L1 Category","pricing_bl_25":"Pricing BL 25",
+        "pareto_classification":"Pareto","source_status":"Source Status",
+        "sku_type":"SKU Type","framework_check":"Framework Check",
+        "price":"Prev","next_price":"Current","diff_price":"Diff","diff_price_pct":"Diff %",
+        "price_status":"Price Status",
+        "cogs":"Prev","next_cogs":"Current","diff_cogs":"Diff","diff_cogs_pct":"Diff %",
+        "cogs_status":"COGS Status",
+        "margin_prev":"Prev","margin_cur":"Current",
+        "diff_margin":"Diff","diff_margin_pct":"Diff %",
+        "margin_pct_prev":"Margin % Prev","margin_pct_cur":"Margin % Cur",
+        "normal_comp_price":"Prev","next_normal_comp_price":"Current","diff_normal_comp":"Diff",
+        "discount_comp_price":"Prev","next_discount_comp_price":"Current","diff_discount_comp":"Diff",
+        "comp_price":"Prev","next_comp_price":"Current",
+        "diff_comp":"Diff","diff_comp_pct":"Diff %","comp_status":"Comp Status",
+        "pi":"Prev","next_pi":"Current","diff_pi":"Diff","diff_pi_pct":"Diff %",
+        "eff_price":"Eff Price","eff_comp":"Eff Comp (Total)",
+        "eff_normal_comp":"Eff Normal Comp","eff_discount_comp":"Eff Discount Comp",
+        "ci_prev":"COGS Idx Prev","ci_cur":"COGS Idx Cur",
+        "pi_group_prev":"PI Grp Prev","pi_group_cur":"PI Grp Cur",
+        "ci_group_prev":"CI Grp Prev","ci_group_cur":"CI Grp Cur",
+        "margin_group_prev":"Margin Grp Prev","margin_group_cur":"Margin Grp Cur",
+        "price_tag":"Price Tag","cogs_tag":"COGS Tag","comp_tag":"Comp Tag",
     }
 
-    # Tab 1: by Δ PI
-    with mover_tabs[0]:
-        gainers, losers = build_top_movers_pi(df, n=30)
-        mv_col1, mv_col2 = st.columns(2)
-        with mv_col1:
-            st.markdown("**🔼 Top 30 PI Gainers (PI naik = harga makin mahal vs comp)**")
-            if gainers.empty:
-                st.info("Tidak ada data.")
+    groups = {
+        "Price":             ["price","next_price","diff_price","diff_price_pct","price_status"],
+        "COGS":              ["cogs","next_cogs","diff_cogs","diff_cogs_pct","cogs_status"],
+        "Margin":            ["margin_prev","margin_cur","diff_margin","diff_margin_pct",
+                              "margin_pct_prev","margin_pct_cur"],
+        "Normal Comp Price": ["normal_comp_price","next_normal_comp_price","diff_normal_comp"],
+        "Discount Comp Price":["discount_comp_price","next_discount_comp_price","diff_discount_comp"],
+        "Comp Price (Eff)":  ["comp_price","next_comp_price","diff_comp","diff_comp_pct","comp_status"],
+        "PI":                ["pi","next_pi","diff_pi","diff_pi_pct"],
+        "Effects":           ["eff_price","eff_comp","eff_normal_comp","eff_discount_comp"],
+        "COGS Index":        ["ci_prev","ci_cur"],
+        "Groups":            ["pi_group_prev","pi_group_cur","ci_group_prev","ci_group_cur",
+                              "margin_group_prev","margin_group_cur"],
+        "Tags":              ["price_tag","cogs_tag","comp_tag"],
+    }
+
+    col_idx = {c: i+1 for i,c in enumerate(cols_order)}
+    data    = d[cols_order]
+
+    # ── Row 1: group headers ──
+    info_cols = [period_col,next_col,"product_id","product_name","l1_category_name",
+                 "pricing_bl_25","pareto_classification","source_status","sku_type",
+                 "framework_check"]
+    for c in info_cols:
+        if c in col_idx:
+            ws.cell(row=1,column=col_idx[c]).fill = PatternFill("solid",fgColor="E8EDF8")
+
+    for grp, gcols in groups.items():
+        valid = [c for c in gcols if c in col_idx]
+        if not valid: continue
+        s_col = min(col_idx[c] for c in valid)
+        e_col = max(col_idx[c] for c in valid)
+        if s_col < e_col:
+            ws.merge_cells(start_row=1,start_column=s_col,end_row=1,end_column=e_col)
+        cell = ws.cell(row=1,column=s_col,value=grp)
+        cell.font = Font(name="Calibri",bold=True,size=10,color=WHITE)
+        cell.fill = PatternFill("solid",fgColor=NAVY)
+        cell.alignment = Alignment(horizontal="center",vertical="center")
+
+    # ── Row 2: column headers ──
+    for c, idx in col_idx.items():
+        cell = ws.cell(row=2,column=idx,value=col_labels.get(c,c))
+        cell.font = Font(name="Calibri",bold=True,size=9,color=WHITE)
+        cell.fill = PatternFill("solid",fgColor=NAVY_LT)
+        cell.alignment = Alignment(horizontal="center",vertical="center",wrap_text=True)
+
+    ws.row_dimensions[1].height = 18
+    ws.row_dimensions[2].height = 30
+    ws.freeze_panes = "A3"
+
+    pct_cols = {"diff_price_pct","diff_cogs_pct","diff_margin_pct","diff_comp_pct",
+                "diff_pi_pct","margin_pct_prev","margin_pct_cur"}
+    num_cols = {"price","next_price","diff_price","cogs","next_cogs","diff_cogs",
+                "margin_prev","margin_cur","diff_margin",
+                "normal_comp_price","next_normal_comp_price","diff_normal_comp",
+                "discount_comp_price","next_discount_comp_price","diff_discount_comp",
+                "comp_price","next_comp_price","diff_comp",
+                "pi","next_pi","diff_pi","ci_prev","ci_cur",
+                "eff_price","eff_comp","eff_normal_comp","eff_discount_comp"}
+
+    # ── Batch write data rows ──
+    total = len(data)
+    for r_idx, row in enumerate(data.itertuples(index=False), 3):
+        if (r_idx-3) % 2000 == 0:
+            progress("Writing rows...", r_idx-3, total)
+        bg = "FFFFFF" if r_idx % 2 == 1 else "F5F7FF"
+        for c_name, c_idx in col_idx.items():
+            val = getattr(row, c_name, None)
+            if isinstance(val, float) and np.isnan(val): val = None
+            if isinstance(val, str) and val == "nan":    val = None
+            cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            cell.font = Font(name="Calibri", size=9)
+            cell.fill = PatternFill("solid", fgColor=bg)
+            cell.alignment = Alignment(
+                horizontal="right" if c_name in pct_cols or c_name in num_cols else "left",
+                vertical="center")
+            if c_name in pct_cols:    cell.number_format = "0.0%"
+            elif c_name in num_cols:  cell.number_format = "#,##0.00"
+            # Framework check highlight
+            if c_name == "framework_check" and val == "TRUE":
+                cell.fill = PatternFill("solid", fgColor="FFF3CD")
+                cell.font = Font(name="Calibri", size=9, bold=True, color="856404")
+
+    progress("Writing rows...", total, total)
+    print()
+
+    # widths
+    widths = {"product_name":28,"l1_category_name":22,period_col:14,next_col:14,
+              "product_id":12,"pricing_bl_25":12,"pareto_classification":14,
+              "sku_type":14,"framework_check":16,"price_status":16,
+              "cogs_status":16,"comp_status":20}
+    for c, idx in col_idx.items():
+        ws.column_dimensions[get_column_letter(idx)].width = widths.get(c, 11)
+
+    print(f"✅  Sheet 1 selesai ({time.time()-t0:.1f}s) — {total:,} baris")
+
+# ─────────────────────────────────────────────
+# SHEET 1B — AGGREGATES (single source of truth)
+# ─────────────────────────────────────────────
+def build_s1b(wb, ov, sr, contribs):
+    print("⏳  Sheet 1B — Aggregates ...")
+    t0   = time.time()
+    ws   = wb.create_sheet("1B. Aggregates")
+    segs = ["Dry","Fresh","Frozen"]
+
+    def _sec(r, text):
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        sc(ws, r, 1, text, bold=True, bg=NAVY, fc=WHITE, fs=11, ind=1)
+        ws.row_dimensions[r].height = 22
+
+    def _hdr(r, labels):
+        hdr(ws, r, labels, h=20)
+
+    def _row(r, label, vals, bold=False, bg_label="FFFFFF"):
+        sc(ws, r, 1, label, bold=bold, bg=bg_label, ind=1, fs=9)
+        for i, v in enumerate(vals):          # fixed: was enumerate(vals, 2)
+            fmt = "#,##0" if isinstance(v, int) else \
+                  "0.0%"  if isinstance(v, float) and abs(v) <= 2 and "w_" in label.lower() else \
+                  "#,##0.000000"
+            sc(ws, r, 2+i, v, bold=bold, align="right", fmt=fmt, fs=9)  # fixed: was 1+i
+        ws.row_dimensions[r].height = 16
+
+    r = 1
+    # ── Section 1: SKU Count ──
+    _sec(r, "Section 1 — SKU Count per Segment"); r += 1
+    _hdr(r, ["Metric","Overall","Dry","Fresh","Frozen"]); r += 1
+
+    addr = {}
+
+    def _store(key, row, segs_list=["Overall","Dry","Fresh","Frozen"]):
+        addr[key] = {}
+        for i, s in enumerate(segs_list):
+            addr[key][s] = f"'1B. Aggregates'!{get_column_letter(2+i)}{row}"
+
+    # SKU type col in Sheet 1 = col I (col 9), BL25 col = col F (col 6)
+    sku_type_col = "'1. Raw Data'!I:I"
+    bl_col       = "'1. Raw Data'!F:F"
+
+    sku_count_formulas = {
+        "n_ex":  ("Existing",      "COUNTIFS"),
+        "n_dep": ("Departing SKU", "COUNTIFS"),
+        "n_new": ("New SKU",       "COUNTIFS"),
+    }
+
+    for lbl, (sku_type, _) in [
+        ("n Existing",     ("Existing",      None)),
+        ("n Departing",    ("Departing SKU", None)),
+        ("n New SKU",      ("New SKU",       None)),
+        ("n Current Pool", (None,            "cur")),
+        ("n Next Pool",    (None,            "nxt")),
+    ]:
+        key = {"n Existing":"n_ex","n Departing":"n_dep","n New SKU":"n_new",
+               "n Current Pool":"n_cur","n Next Pool":"n_next"}[lbl]
+
+        row_vals = []
+        for seg in ["Overall","Dry","Fresh","Frozen"]:
+            bl_filter = f',{bl_col},"{seg}"' if seg != "Overall" else ""
+            if sku_type:
+                f = f'=COUNTIFS({sku_type_col},"{sku_type}"{bl_filter})'
+            elif key == "n_cur":
+                f1 = f'=COUNTIFS({sku_type_col},"Existing"{bl_filter})'
+                f2 = f'COUNTIFS({sku_type_col},"Departing SKU"{bl_filter.replace("=","",1) if bl_filter else ""})'
+                f  = f'={f1[1:]}+COUNTIFS({sku_type_col},"Departing SKU"{bl_filter})'
+            else:  # n_next
+                f  = f'=COUNTIFS({sku_type_col},"Existing"{bl_filter})+COUNTIFS({sku_type_col},"New SKU"{bl_filter})'
+            row_vals.append(f)
+
+        # Write formulas directly
+        sc(ws, r, 1, lbl, ind=1, fs=9)
+        for i, fval in enumerate(row_vals):
+            cell = ws.cell(row=r, column=2+i, value=fval)
+            cell.number_format = "#,##0"
+            cell.font = Font(name="Calibri", size=9)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+        ws.row_dimensions[r].height = 16
+        _store(key, r)
+        r += 1
+
+    r += 1
+    # ── Section 2: Avg PI ──
+    _sec(r, "Section 2 — Avg PI per Segment"); r += 1
+    _hdr(r, ["Metric","Overall","Dry","Fresh","Frozen"]); r += 1
+
+    pi_prev_col = "'1. Raw Data'!AF:AF"   # pi col (col 32)
+    pi_cur_col  = "'1. Raw Data'!AG:AG"   # next_pi col (col 33)
+
+    for lbl, key, pi_col, type_filter in [
+        ("A — Avg PI Prev (existing+dep)", "A",   pi_prev_col, ["Existing","Departing SKU"]),
+        ("B — Avg PI Prev (existing only)", "B",  pi_prev_col, ["Existing"]),
+        ("C — Avg PI Current (existing only)","C",pi_cur_col,  ["Existing"]),
+        ("D — Avg PI Current (new SKU only)","D", pi_cur_col,  ["New SKU"]),
+        ("E — Avg PI Current (existing+new)","E", None,        None),
+    ]:
+        sc(ws, r, 1, lbl, ind=1, fs=9)
+
+        for i, seg in enumerate(["Overall","Dry","Fresh","Frozen"]):
+            bl_filter = f',{bl_col},"{seg}"' if seg != "Overall" else ""
+            if key == "E":
+                # E = (n_ex * C + n_new * D) / n_next
+                c_ref = addr["C"][seg]
+                d_ref = addr["D"][seg]
+                n_ex_ref  = addr["n_ex"][seg]
+                n_new_ref = addr["n_new"][seg]
+                n_nxt_ref = addr["n_next"][seg]
+                fval = f"=({n_ex_ref}*{c_ref}+{n_new_ref}*{d_ref})/{n_nxt_ref}"
+            elif len(type_filter) == 1:
+                t = type_filter[0]
+                fval = f"=AVERAGEIFS({pi_col},{sku_type_col},{chr(34)}{t}{chr(34)}{bl_filter})"
             else:
-                gdf = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(gainers.iterrows())])
-                st.dataframe(gdf.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
-        with mv_col2:
-            st.markdown("**🔽 Top 30 PI Losers (PI turun = lebih kompetitif vs comp)**")
-            if losers.empty:
-                st.info("Tidak ada data.")
-            else:
-                ldf = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(losers.iterrows())])
-                st.dataframe(ldf.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
+                # Two types — weighted average
+                t1, t2 = type_filter
+                n1 = f"COUNTIFS({sku_type_col},{chr(34)}{t1}{chr(34)}{bl_filter})"
+                n2 = f"COUNTIFS({sku_type_col},{chr(34)}{t2}{chr(34)}{bl_filter})"
+                s1 = f"SUMIFS({pi_col},{sku_type_col},{chr(34)}{t1}{chr(34)}{bl_filter})"
+                s2 = f"SUMIFS({pi_col},{sku_type_col},{chr(34)}{t2}{chr(34)}{bl_filter})"
+                fval = f"=({s1}+{s2})/({n1}+{n2})"
 
-    # Tab 2: by Price Effect
-    with mover_tabs[1]:
-        st.caption("Mover dengan **Price Effect** (eff_price) terbesar — kontribusi perubahan harga Astro ke PI movement.")
-        ex_p = df[df['sku_type'] == 'Existing'].dropna(subset=['eff_price']).copy()
-        if len(ex_p) == 0:
-            st.info("Tidak ada data dengan Price Effect.")
+            cell = ws.cell(row=r, column=2+i, value=fval)
+            cell.number_format = "#,##0.000000"
+            cell.font = Font(name="Calibri", size=9)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+
+        ws.row_dimensions[r].height = 16
+        _store(key, r)
+        r += 1
+
+    r += 1
+    # ── Section 3: Effect per Segment ──
+    _sec(r, "Section 3 — Effect per Segment (avg per SKU)"); r += 1
+    _hdr(r, ["Effect","Overall","Dry","Fresh","Frozen"]); r += 1
+
+    for lbl, key in [("1. Churned SKU Effect","eff_dep"),
+                     ("2. Price Change Effect","eff_price"),
+                     ("3. Comp Price Effect","eff_comp"),
+                     ("  3.1 Normal Comp Price Effect","eff_normal_comp"),
+                     ("  3.2 Discount (Blended) Comp Price Effect","eff_discount_comp"),
+                     ("4. New SKU Effect","eff_new"),("Total Delta","total")]:
+        vals = [ov[key]] + [sr[s][key] for s in segs]
+        _row(r, lbl, vals)
+        _store(key, r)
+        r += 1
+
+    r += 1
+    # ── Section 4: Exact Contributions ──
+    _sec(r, "Section 4 — Contribution to Overall (Exact Formula)"); r += 1
+    _hdr(r, ["Effect","Overall","Dry","Fresh","Frozen"]); r += 1
+
+    for lbl, key in [("1. Churned SKU Contrib","eff_dep"),
+                     ("2. Price Change Contrib","eff_price"),
+                     ("3. Comp Price Contrib","eff_comp"),
+                     ("  3.1 Normal Comp Price Contrib","eff_normal_comp"),
+                     ("  3.2 Discount (Blended) Comp Price Contrib","eff_discount_comp"),
+                     ("4. New SKU Contrib","eff_new")]:
+        ov_val = ov[key]  # overall effect = sum of exact contribs
+        vals = [ov_val] + [contribs[s][key] for s in segs]
+        _row(r, lbl, vals)
+        _store("contrib_"+key, r)
+        # Verify
+        s_sum = sum(contribs[s][key] for s in segs)
+        if abs(s_sum - ov_val) > 0.0001:
+            print(f"  ⚠️  Contrib mismatch {key}: sum={s_sum:.6f} ov={ov_val:.6f}")
+        r += 1
+
+    r += 1
+    # ── Section 5: Weights ──
+    _sec(r, "Section 5 — Weights per Segment"); r += 1
+    _hdr(r, ["Weight Type","Overall","Dry","Fresh","Frozen"]); r += 1
+
+    for lbl, key in [("w_existing (for price/comp)","w_ex"),
+                     ("w_current (for departing)","w_cur"),
+                     ("w_next (for new SKU)","w_nxt")]:
+        vals = [1.0] + [sr[s][key] for s in segs]
+        _row(r, lbl, vals)
+        r += 1
+
+    r += 1
+    # ── Section 6: Movement Summary ──
+    s1      = "'1. Raw Data'"
+    c_type  = f"{s1}!I:I"
+    c_bl    = f"{s1}!F:F"
+    c_dp    = f"{s1}!M:M"
+    c_dppct = f"{s1}!N:N"
+    c_dc    = f"{s1}!AC:AC"
+    c_dcpct = f"{s1}!AD:AD"
+    c_dg    = f"{s1}!R:R"
+    c_dgpct = f"{s1}!S:S"
+
+    def _s6_hdr(r):
+        hdr(ws, r, ["Metric","Overall","Dry","Fresh","Frozen"], h=20)
+
+    def _s6_write(r, label, formulas, fmt="#,##0", ind=2):
+        sc(ws, r, 1, label, ind=ind, fs=9)
+        for i, fv in enumerate(formulas):
+            cell = ws.cell(row=r, column=2+i, value=fv)
+            cell.number_format = fmt
+            cell.font = Font(name="Calibri", size=9)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+        ws.row_dimensions[r].height = 16
+
+    def _s6_sub(r, title):
+        sc(ws, r, 1, title, bold=True, bg=LT_BLUE, ind=1, fs=9)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+        ws.row_dimensions[r].height = 14
+
+    def mkf(metric, sv):
+        bl2 = f',{c_bl},"{sv}"' if sv != "Overall" else ""
+        ne  = f"COUNTIFS({c_type},\"Existing\"{bl2})"
+        nd  = f"COUNTIFS({c_type},\"Departing SKU\"{bl2})"
+        nn  = f"COUNTIFS({c_type},\"New SKU\"{bl2})"
+        if   metric == "n_cur":    return f"=({ne}+{nd})"
+        elif metric == "n_nxt":    return f"=({ne}+{nn})"
+        elif metric == "n_ex":     return f"={ne}"
+        elif metric == "n_dep":    return f"={nd}"
+        elif metric == "n_new":    return f"={nn}"
+        elif metric == "pct_dep":  return f"=IFERROR({nd}/({ne}+{nd}),0)"
+        elif metric == "pct_new":  return f"=IFERROR({nn}/({ne}+{nn}),0)"
+
+    def mkm(metric, sv, abs_col, pct_col):
+        bl2 = f',{c_bl},"{sv}"' if sv != "Overall" else ""
+        ne  = f"COUNTIFS({c_type},\"Existing\"{bl2})"
+        nm  = f"(COUNTIFS({c_type},\"Existing\"{bl2},{abs_col},\">0\")+COUNTIFS({c_type},\"Existing\"{bl2},{abs_col},\"<0\"))"
+        if   metric == "n":    return f"={nm}"
+        elif metric == "pct":  return f"=IFERROR({nm}/{ne},0)"
+        elif metric == "avg":  return f"=AVERAGEIFS({pct_col},{c_type},\"Existing\"{bl2},{abs_col},\"<>0\")"
+
+    segs4 = ["Overall","Dry","Fresh","Frozen"]
+
+    # Overall — 4 cols
+    bg_map = {"Overall":NAVY,"Dry":"145A32","Fresh":"1A5276","Frozen":"6C3483"}
+    ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=5)
+    sc(ws,r,1,"  Section 6 — Movement Summary",bold=True,bg=NAVY,fc=WHITE,fs=11)
+    ws.row_dimensions[r].height=24; r+=1
+    _s6_hdr(r); r+=1
+
+    _s6_sub(r, "SKU Composition"); r+=1
+    for lbl,metric,fmt in [
+        ("n Current Pool (ex+dep)","n_cur","#,##0"),
+        ("n Existing","n_ex","#,##0"),
+        ("n Departing","n_dep","#,##0"),
+        ("  % dari current","pct_dep","0.0%"),
+        ("n Next Pool (ex+new)","n_nxt","#,##0"),
+        ("n New SKU","n_new","#,##0"),
+        ("  % dari next","pct_new","0.0%"),
+    ]:
+        _s6_write(r, lbl, [mkf(metric,sv) for sv in segs4], fmt,
+                  ind=3 if lbl.startswith("  ") else 2)
+        r+=1
+
+    for title, ac, pc in [
+        ("Price Movement (existing only)", c_dp, c_dppct),
+        ("Comp Movement (existing only)",  c_dc, c_dcpct),
+        ("COGS Movement (existing only)",  c_dg, c_dgpct),
+    ]:
+        _s6_sub(r, title); r+=1
+        for lbl,metric in [
+            ("n SKU berubah","n"),
+            ("  % dari existing","pct"),
+            ("  avg change","avg"),
+        ]:
+            fmt = "0.00%" if metric=="avg" else ("0.0%" if metric=="pct" else "#,##0")
+            _s6_write(r, lbl, [mkm(metric,sv,ac,pc) for sv in segs4], fmt,
+                      ind=3 if lbl.startswith("  ") else 2)
+            r+=1
+
+    r+=1
+
+    cw(ws, {"A":38,"B":14,"C":14,"D":14,"E":14})
+    print(f"✅  Sheet 1B selesai ({time.time()-t0:.1f}s)")
+    return addr
+
+# ─────────────────────────────────────────────
+# SHEET 2 — PI DECOMPOSITION  (hardcoded + ref col)
+# ─────────────────────────────────────────────
+def build_s2(wb, addr, ov, sr, contribs):
+    print("⏳  Sheet 2 — PI Decomposition ...")
+    t0   = time.time()
+    ws   = wb.create_sheet("2. PI Decomposition")
+    segs = ["Dry","Fresh","Frozen"]
+
+    # Reference col starts at col 8 (gap after col 5)
+    REF_START = 8
+
+    def _val_cell(ws, r, col, val, fmt, bold=False, bg="FFFFFF", ftc=None):
+        cell = ws.cell(row=r, column=col, value=val)
+        cell.number_format = fmt
+        # Color: positive=green, negative=red, zero/baseline/result=default
+        if ftc:
+            color = ftc
+        elif val is not None and not bold and isinstance(val, (int, float)):
+            color = GREEN_TXT if val > 0.0001 else (RED_TXT if val < -0.0001 else "000000")
         else:
-            price_gain = ex_p.nlargest(30, 'eff_price')
-            price_loss = ex_p.nsmallest(30, 'eff_price')
-            p_col1, p_col2 = st.columns(2)
-            with p_col1:
-                st.markdown("**🔼 Top 30 — Price Effect Push UP (Astro naik harga)**")
-                df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(price_gain.iterrows())])
-                st.dataframe(df_top.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
-            with p_col2:
-                st.markdown("**🔽 Top 30 — Price Effect Push DOWN (Astro turun harga)**")
-                df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(price_loss.iterrows())])
-                st.dataframe(df_top.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
+            color = WHITE if bg == NAVY else "000000"
+        cell.font  = Font(name="Calibri", bold=bold, size=10, color=color)
+        cell.fill  = PatternFill("solid", fgColor=bg)
+        cell.alignment = Alignment(horizontal="right", vertical="center")
+        cell.border = bb()
+        return cell
 
-    # Tab 3: by Comp Price Effect
-    with mover_tabs[2]:
-        st.caption("Mover dengan **Comp Price Effect** (eff_comp = Normal + Discount) terbesar — kontribusi perubahan harga competitor ke PI.")
-        ex_c = df[df['sku_type'] == 'Existing'].dropna(subset=['eff_comp']).copy()
-        if len(ex_c) == 0:
-            st.info("Tidak ada data dengan Comp Effect.")
+    def _data_row(r, label, key, is_base=False, is_res=False, is_delta=False, is_contrib=False):
+        bg  = LT_BLUE if is_base else (NAVY if is_res else ("F0F3FA" if is_delta else "FFFFFF"))
+        bld = is_base or is_res or is_delta
+        fmt = "#,##0.000" if (is_base or is_res) else "+#,##0.000;-#,##0.000;-"
+        ftc_fixed = (WHITE if is_res else None)
+
+        sc(ws, r, 1, label, bold=bld, bg=bg,
+           fc=WHITE if is_res else "000000", ind=1, bdr=bb())
+        ws.row_dimensions[r].height = 20
+
+        ref_key = ("contrib_"+key) if is_contrib else key
+        vals_map = {}
+        if ref_key in addr:
+            vals_map = {seg: addr[ref_key][seg] for seg in ["Overall"]+segs if seg in addr[ref_key]}
+
+        # Hardcoded values
+        if is_contrib:
+            data_vals = [ov[key]] + [contribs[s][key] for s in segs]
         else:
-            comp_gain = ex_c.nlargest(30, 'eff_comp')
-            comp_loss = ex_c.nsmallest(30, 'eff_comp')
-            c_col1, c_col2 = st.columns(2)
-            with c_col1:
-                st.markdown("**🔼 Top 30 — Comp Effect Push UP (comp TURUN harga → PI Astro naik)**")
-                df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(comp_gain.iterrows())])
-                st.dataframe(df_top.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
-            with c_col2:
-                st.markdown("**🔽 Top 30 — Comp Effect Push DOWN (comp NAIK harga → PI Astro turun)**")
-                df_top = pd.DataFrame([fmt_mover_row(r, i+1) for i, (_, r) in enumerate(comp_loss.iterrows())])
-                st.dataframe(df_top.style.format(fmt_mover),
-                             use_container_width=True, hide_index=True, height=600)
+            data_vals = [ov[key]] + [sr[s][key] for s in segs]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 8 — PI DISTRIBUTION (alt visual already in Zone 6)
-    # We use this slot for: STRUCTURAL LOSS + COGS NEED IMPROVE
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">8️⃣ Quadrant Analysis (PI × Margin × CI)</div>', unsafe_allow_html=True)
-    st.caption("Cross-tables untuk identify SKU clusters yang misaligned. Filter di kanan untuk customize view.")
+        for i, (seg, val) in enumerate(zip(["Overall"]+segs, data_vals)):
+            _val_cell(ws, r, 2+i, val, fmt, bold=bld, bg=bg, ftc=ftc_fixed)
 
-    # Display label remap (fix spacing issue: '-20to-10%' → '-20% to -10%')
-    MG_LBL_DISPLAY = {
-        "A.<-20%":      "A. <-20%",
-        "B.-20to-10%":  "B. -20% to -10%",
-        "C.-10to0%":    "C. -10% to 0%",
-        "D.0to10%":     "D. 0% to 10%",
-        "E.10to20%":    "E. 10% to 20%",
-        "F.20to30%":    "F. 20% to 30%",
-        "G.30to50%":    "G. 30% to 50%",
-        "H.>50%":       "H. >50%",
+        # Reference col — label + source cells (greyed out, far right)
+        ref_label = ws.cell(row=r, column=REF_START, value=f"← source 1B")
+        ref_label.font = Font(name="Calibri", italic=True, size=7, color="C0C0C0")
+        ref_label.alignment = Alignment(horizontal="left", vertical="center")
+        for i, seg in enumerate(["Overall"]+segs):
+            if seg in vals_map:
+                rc = ws.cell(row=r, column=REF_START+1+i, value=f"={vals_map[seg]}")
+                rc.number_format = fmt
+                rc.font = Font(name="Calibri", italic=True, size=7, color="C0C0C0")
+                rc.alignment = Alignment(horizontal="right", vertical="center")
+
+    def _weight_subrow(r, key_w):
+        sc(ws, r, 1, "  \u21b3 SKU weight", italic=True, fs=8, fc=MUTED, bg=SUB_BG)
+        c_ov = ws.cell(row=r, column=2, value=1.0)
+        c_ov.number_format = "0.0%"
+        c_ov.font = Font(name="Calibri", italic=True, size=8, color=MUTED)
+        c_ov.fill = PatternFill("solid", fgColor=SUB_BG)
+        c_ov.alignment = Alignment(horizontal="right", vertical="center")
+        for i, seg in enumerate(segs):
+            val = sr[seg].get(key_w, 0.0)
+            c = ws.cell(row=r, column=3+i, value=val)
+            c.number_format = "0.0%"
+            c.font = Font(name="Calibri", italic=True, size=8, color=MUTED)
+            c.fill = PatternFill("solid", fgColor=SUB_BG)
+            c.alignment = Alignment(horizontal="right", vertical="center")
+        ws.row_dimensions[r].height = 14
+
+    # ── TABLE 1: Waterfall ──
+    r = 2
+    sec(ws, r, "Tabel 1 — Waterfall Avg PI per Pricing BL 25", 5)
+    r += 1
+    hdr(ws, r, ["Effect","Overall","Dry","Fresh","Frozen"])
+    # Reference header
+    sc(ws, r, REF_START, "Source (1B ref)", italic=True, fs=7, fc="C0C0C0", align="center")
+    for i, seg in enumerate(["Overall","Dry","Fresh","Frozen"]):
+        sc(ws, r, REF_START+1+i, seg, italic=True, fs=7, fc="C0C0C0", align="center")
+    r += 1
+
+    for label, key, ib, ir, id_ in [
+        ("Baseline — Avg PI Prev (A)",       "A",                  True,  False, False),
+        ("+ 1. Churned SKU Effect",          "eff_dep",            False, False, False),
+        ("+ 2. Price Change Effect",         "eff_price",          False, False, False),
+        ("+ 3. Comp Price Effect",  "eff_comp",           False, False, False),
+        ("    3.1 Normal Comp Price Effect",       "eff_normal_comp",    False, False, False),
+        ("    3.2 Discount (Blended) Comp Price Effect", "eff_discount_comp", False, False, False),
+        ("+ 4. New SKU Effect",              "eff_new",            False, False, False),
+        ("Result — Avg PI Current (E)",      "E",                  False, True,  False),
+        ("Total Delta",                       "total",              False, False, True),
+    ]:
+        _data_row(r, label, key, ib, ir, id_)
+        r += 1
+
+    r += 1
+    # ── TABLE 2: Contributions ──
+    sec(ws, r, "Tabel 2 — Kontribusi per Segment ke Overall Effect (Exact)", 5)
+    r += 1
+    hdr(ws, r, ["Effect","Overall","Dry","Fresh","Frozen"])
+    r += 1
+    _weight_subrow(r, "w_ex")
+    r += 1
+
+    for label, key, wkey in [
+        ("1. Churned SKU Effect",                  "eff_dep",            "w_cur"),
+        ("2. Price Change Effect",                 "eff_price",          "w_ex"),
+        ("3. Comp Price Effect",          "eff_comp",           "w_ex"),
+        ("  3.1 Normal Comp Price Effect",               "eff_normal_comp",    "w_ex"),
+        ("  3.2 Discount (Blended) Comp Price Effect",   "eff_discount_comp",  "w_ex"),
+        ("4. New SKU Effect",                      "eff_new",            "w_nxt"),
+    ]:
+        _data_row(r, label, key, is_contrib=True)
+        r += 1
+        _weight_subrow(r, wkey)
+        r += 1
+
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    c = ws.cell(row=r, column=1,
+        value="* Kontribusi exact: price/comp = sum_effect_seg/n_ex_total | "
+              "departing = sum_pi_ex_seg/n_ex - sum_pi_cur_seg/n_cur | "
+              "new = (sum_npi_ex_seg+sum_npi_new_seg)/n_next - sum_npi_ex_seg/n_ex")
+    c.font = Font(name="Calibri", italic=True, size=8, color=MUTED)
+    c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.row_dimensions[r].height = 28
+
+    # Column widths
+    cw(ws, {"A":40,"B":14,"C":14,"D":14,"E":14,"F":4,"G":4,
+            "H":14,"I":14,"J":14,"K":14,"L":14})
+    ws.freeze_panes = "B1"
+    print(f"✅  Sheet 2 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# HELPER: DIMENSION SHEET (S3/S4)
+# ─────────────────────────────────────────────
+def _dim_sheet(ws, d, dim_col, dim_label):
+    dims = sorted(d[dim_col].dropna().unique(), key=str)
+    hdrs = [dim_label,"n Existing","n Departing","n New",
+            "n Comp Down","n Comp Stay","n Comp Up",
+            "Avg PI Prev","Avg PI Cur","Total Delta",
+            "1. Churned Eff","2. Price Eff","3. Comp Price Eff",
+            "3.1 Normal Comp Price Eff","3.2 Discount (Blended) Comp Price Eff","4. New SKU Eff"]
+    hdr(ws, 1, hdrs, h=30)
+    ws.freeze_panes = "B2"
+
+    rows_data = []
+    total = len(dims)
+    for i, dv in enumerate(dims):
+        if i % 10 == 0: progress(f"Computing {dim_label}...", i, total)
+        sub = d[d[dim_col]==dv]
+        res = decompose(sub)
+        ex_sub = sub[sub["sku_type"]=="Existing"]
+        rows_data.append((dv, res,
+                          (ex_sub["comp_tag"]=="Down").sum(),
+                          (ex_sub["comp_tag"]=="Stay").sum(),
+                          (ex_sub["comp_tag"]=="Up").sum()))
+    rows_data.append(("OVERALL", decompose(d),
+                      (d[d["sku_type"]=="Existing"]["comp_tag"]=="Down").sum(),
+                      (d[d["sku_type"]=="Existing"]["comp_tag"]=="Stay").sum(),
+                      (d[d["sku_type"]=="Existing"]["comp_tag"]=="Up").sum()))
+    progress(f"Writing {dim_label}...", total, total); print()
+
+    for r_idx, (dv, res, ncd, ncs, ncu) in enumerate(rows_data, 2):
+        is_ov = dv == "OVERALL"
+        bg  = NAVY if is_ov else ("FFFFFF" if r_idx%2==0 else "F5F7FF")
+        ftc = WHITE if is_ov else "000000"
+        vals = [dv, res["n_ex"], res["n_dep"], res["n_new"], ncd, ncs, ncu,
+                res["A"], res["E"], res["total"],
+                res["eff_dep"], res["eff_price"], res["eff_comp"],
+                res["eff_normal_comp"], res["eff_discount_comp"],
+                res["eff_new"]]
+        for ci, val in enumerate(vals, 1):
+            cell = ws.cell(row=r_idx, column=ci, value=val)
+            cell.font = Font(name="Calibri", bold=is_ov, size=9, color=ftc)
+            cell.fill = PatternFill("solid", fgColor=bg)
+            cell.alignment = Alignment(
+                horizontal="left" if ci==1 else "right",
+                vertical="center", indent=1 if ci==1 else 0)
+            if ci in {2,3,4,5,6,7}: cell.number_format = "#,##0"
+            elif ci >= 8:
+                cell.number_format = "#,##0.000"
+                if not is_ov and ci >= 10 and isinstance(val, float):
+                    if val < -0.0001: cell.font = Font(name="Calibri",size=9,color=RED_TXT)
+                    elif val > 0.0001: cell.font = Font(name="Calibri",size=9,color=GREEN_TXT)
+        ws.row_dimensions[r_idx].height = 16
+
+    ws.column_dimensions["A"].width = 28
+    for i in range(2, len(hdrs)+1):
+        ws.column_dimensions[get_column_letter(i)].width = 12
+
+def build_s3(wb, d):
+    print("⏳  Sheet 3 — L1 Category ...")
+    t0 = time.time()
+    ws = wb.create_sheet("3. L1 Category")
+    _dim_sheet(ws, d, "l1_category_name", "L1 Category")
+    print(f"✅  Sheet 3 selesai ({time.time()-t0:.1f}s)")
+
+def build_s4(wb, d):
+    print("⏳  Sheet 4 — Pareto ...")
+    t0 = time.time()
+    ws = wb.create_sheet("4. Pareto")
+    _dim_sheet(ws, d, "pareto_classification", "Pareto")
+    print(f"✅  Sheet 4 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# HELPER: 3x3 MATRIX
+# ─────────────────────────────────────────────
+def _matrix_3x3(ws, d, title_text, start_row=1, seg=None):
+    DIRS = ["Down","Stay","Up"]
+    ncols = 10
+    sec(ws, start_row, title_text, ncols, seg=seg)
+    r = start_row + 1
+
+    ex = d[d["sku_type"]=="Existing"].copy()
+    total = len(ex)
+    _, seg_lt = SEG_COLORS.get(seg or "Overall", SEG_COLORS["Overall"])
+    tl = Border(left=_s("medium","1C4587"), bottom=_s())
+    tlo = Border(left=_s("medium","1C4587"))
+
+    matrix = np.zeros((3,3), dtype=int)
+    for ri, pr in enumerate(DIRS):
+        for ci, cr in enumerate(DIRS):
+            matrix[ri,ci] = int(((ex["price_tag"]==pr)&(ex["comp_tag"]==cr)).sum())
+    row_tots = [int(matrix[ri,:].sum()) for ri in range(3)]
+    col_tots = [int(matrix[:,ci].sum()) for ci in range(3)]
+
+    # header — col1=blank(row label), col2=blank(dir label), col3-5=Down/Stay/Up, col6=Total
+    #           col7=Down%, col8=Stay%, col9=Up%, col10=Total%
+    for i, h in enumerate(["",""] + DIRS + ["Total"]):
+        sc(ws,r,1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+    for i, h in enumerate(DIRS+["Total %"]):
+        c = sc(ws,r,7+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+        if i==0: c.border = tlo
+    ws.row_dimensions[r].height = 22; r += 1
+
+    for ri, pr in enumerate(DIRS):
+        if ri==0:
+            ws.merge_cells(start_row=r,start_column=1,end_row=r+2,end_column=1)
+            sc(ws,r,1,"PRICE KITA",bold=True,bg=seg_lt,align="center",wrap=True)
+        sc(ws,r,2,pr,bold=True,bg=seg_lt,align="center",fs=9)
+        for ci in range(3):
+            v = int(matrix[ri,ci])
+            bg = "FFF0F0" if (ri==0 and ci==0) else (seg_lt if ri==ci else "FFFFFF")
+            sc(ws,r,3+ci,v,bg=bg,align="right",fmt="#,##0",bdr=bb(),fs=9)
+        sc(ws,r,6,row_tots[ri],bold=True,bg="F0F3FA",align="right",fmt="#,##0",bdr=bb(),fs=9)
+        for ci in range(3):
+            pv = matrix[ri,ci]/total if total>0 else 0
+            bg = "FFF0F0" if (ri==0 and ci==0) else (seg_lt if ri==ci else "FFFFFF")
+            c = sc(ws,r,7+ci,pv,bg=bg,align="right",fmt="0.0%",bdr=bb(),fs=9)
+            if ci==0: c.border = tl
+        sc(ws,r,10,row_tots[ri]/total if total>0 else 0,
+           bold=True,bg="F0F3FA",align="right",fmt="0.0%",bdr=bb(),fs=9)
+        r += 1
+
+    sc(ws,r,1,"Total",bold=True,bg=NAVY,fc=WHITE,fs=9)
+    sc(ws,r,2,"",bg=NAVY)
+    for ci in range(3):
+        sc(ws,r,3+ci,col_tots[ci],bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+    sc(ws,r,6,total,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+    for ci in range(3):
+        c = sc(ws,r,7+ci,col_tots[ci]/total if total>0 else 0,
+               bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        if ci==0: c.border = Border(left=_s("medium",WHITE))
+    sc(ws,r,10,1.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+    r += 1
+    return r + 2
+
+def build_s5(wb, d):
+    print("⏳  Sheet 5 — Price vs Comp Matrix ...")
+    t0 = time.time()
+    ws = wb.create_sheet("5. Price vs Comp Matrix")
+    r = _matrix_3x3(ws, d, "Price vs Comp Movement Matrix", seg="Overall")
+    for seg in ["Dry","Fresh","Frozen"]:
+        r = _matrix_3x3(ws, d[d["pricing_bl_25"]==seg],
+                        "Price vs Comp Movement Matrix", r, seg=seg)
+    cw(ws, {"A":14,"B":10,"C":12,"D":12,"E":12,"F":12,
+            "G":12,"H":12,"I":12,"J":12})
+    print(f"✅  Sheet 5 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# HELPER: CROSS TABLE  (side-by-side count + %)
+# ─────────────────────────────────────────────
+def _cross_table(ws, d_sub, row_labels, col_lbls, row_col, col_col,
+                 title_text, start_row, n_total=None, seg=None):
+    n_cols = len(col_lbls)
+    ncols  = 1 + n_cols + 1 + n_cols + 1
+    sec(ws, start_row, title_text, ncols, seg=seg)
+    r = start_row + 1
+
+    _, seg_lt = SEG_COLORS.get(seg or "Overall", SEG_COLORS["Overall"])
+    tl  = Border(left=_s("medium","1C4587"), bottom=_s())
+    tlo = Border(left=_s("medium","1C4587"))
+
+    # compute
+    rc_sub = d_sub[row_col].astype(str)
+    cc_sub = d_sub[col_col].astype(str)
+    counts = {}
+    for rl in row_labels:
+        counts[rl] = {cl: int(((rc_sub==rl)&(cc_sub==cl)).sum()) for cl in col_lbls}
+    row_tots = {rl: sum(counts[rl].values()) for rl in row_labels}
+    col_tots = {cl: sum(counts[rl][cl] for rl in row_labels) for cl in col_lbls}
+    grand    = sum(row_tots.values())
+    if n_total is None: n_total = grand
+    off = n_cols + 2  # start col of % block
+
+    # header
+    for i, h in enumerate([""]+col_lbls+["Total"]):
+        sc(ws,r,1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+    for i, h in enumerate(col_lbls+["Total %"]):
+        c = sc(ws,r,off+1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+        if i==0: c.border = tlo
+    ws.row_dimensions[r].height = 28; r += 1
+
+    for ri, rl in enumerate(row_labels):
+        bg_row = "FFFFFF" if ri%2==0 else "FAFBFF"
+        sc(ws,r,1,rl,bg=bg_row,ind=1,bdr=bb(),fs=9)
+        max_v = max(counts[rl].values()) if counts[rl] else 0
+        for ci, cl in enumerate(col_lbls):
+            v  = counts[rl][cl]
+            bg = seg_lt if (v==max_v and v>0) else bg_row
+            sc(ws,r,2+ci,v,bg=bg,align="right",fmt="#,##0",bdr=bb(),fs=9)
+        sc(ws,r,1+n_cols+1,row_tots[rl],bold=True,bg="F0F3FA",
+           align="right",fmt="#,##0",bdr=bb(),fs=9)
+        for ci, cl in enumerate(col_lbls):
+            v  = counts[rl][cl]/n_total if n_total>0 else 0
+            bg = seg_lt if (counts[rl][cl]==max_v and counts[rl][cl]>0) else bg_row
+            c  = sc(ws,r,off+1+ci,v,bg=bg,align="right",fmt="0.0%",bdr=bb(),fs=9)
+            if ci==0: c.border = tl
+        sc(ws,r,off+1+n_cols,row_tots[rl]/n_total if n_total>0 else 0,
+           bold=True,bg="F0F3FA",align="right",fmt="0.0%",bdr=bb(),fs=9)
+        r += 1
+
+    sc(ws,r,1,"Total",bold=True,bg=NAVY,fc=WHITE,fs=9)
+    for ci,cl in enumerate(col_lbls):
+        sc(ws,r,2+ci,col_tots[cl],bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+    sc(ws,r,1+n_cols+1,grand,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+    for ci,cl in enumerate(col_lbls):
+        c = sc(ws,r,off+1+ci,col_tots[cl]/n_total if n_total>0 else 0,
+               bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        if ci==0: c.border = Border(left=_s("medium",WHITE))
+    sc(ws,r,off+1+n_cols,1.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+    r += 1
+    return r + 2
+
+def build_s7(wb, d):
+    print("⏳  Sheet 7 — PI vs Margin ...")
+    t0 = time.time()
+    ws = wb.create_sheet("7. PI vs Margin")
+    ex = d[d["next_pi"].notna() & d["margin_pct_cur"].notna()].copy()
+    r  = 1
+    for seg_label, sf in [("Overall",None),("Dry","Dry"),("Fresh","Fresh"),("Frozen","Frozen")]:
+        sub = ex if sf is None else ex[ex["pricing_bl_25"]==sf]
+        r = _cross_table(ws, sub, MG_LBL, PI_LBL,
+                         "margin_group_cur","pi_group_cur",
+                         "PI Group (current) vs Margin Group (current)",
+                         r, n_total=len(sub), seg=seg_label)
+    ws.column_dimensions["A"].width = 16
+    for i in range(2, len(PI_LBL)*2+4):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    print(f"✅  Sheet 7 selesai ({time.time()-t0:.1f}s)")
+
+def build_s8(wb, d):
+    print("⏳  Sheet 8 — COGS Index vs PI ...")
+    t0 = time.time()
+    ws = wb.create_sheet("8. COGS Index vs PI")
+    ex = d[d["next_pi"].notna() & d["ci_cur"].notna()].copy()
+    r  = 1
+    for seg_label, sf in [("Overall",None),("Dry","Dry"),("Fresh","Fresh"),("Frozen","Frozen")]:
+        sub = ex if sf is None else ex[ex["pricing_bl_25"]==sf]
+        r = _cross_table(ws, sub, CI_LBL, PI_LBL,
+                         "ci_group_cur","pi_group_cur",
+                         "COGS Index Group (current) vs PI Group (current)",
+                         r, n_total=len(sub), seg=seg_label)
+    ws.column_dimensions["A"].width = 14
+    for i in range(2, len(PI_LBL)*2+4):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    print(f"✅  Sheet 8 selesai ({time.time()-t0:.1f}s)")
+
+def build_s9(wb, d):
+    print("⏳  Sheet 9 — COGS Index vs Margin ...")
+    t0 = time.time()
+    ws = wb.create_sheet("9. COGS Index vs Margin")
+    ex = d[d["margin_pct_cur"].notna() & d["ci_cur"].notna()].copy()
+    r  = 1
+    for seg_label, sf in [("Overall",None),("Dry","Dry"),("Fresh","Fresh"),("Frozen","Frozen")]:
+        sub = ex if sf is None else ex[ex["pricing_bl_25"]==sf]
+        r = _cross_table(ws, sub, CI_LBL, MG_LBL,
+                         "ci_group_cur","margin_group_cur",
+                         "COGS Index Group (current) vs Margin Group (current)",
+                         r, n_total=len(sub), seg=seg_label)
+    ws.column_dimensions["A"].width = 14
+    for i in range(2, len(MG_LBL)*2+4):
+        ws.column_dimensions[get_column_letter(i)].width = 11
+    print(f"✅  Sheet 9 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# SHEET 6 — PI DISTRIBUTION & MOVEMENT
+# ─────────────────────────────────────────────
+def build_s6(wb, d):
+    print("⏳  Sheet 6 — PI Distribution & Movement ...")
+    t0 = time.time()
+    ws = wb.create_sheet("6. PI Distribution")
+    ex = d[d["pi"].notna() & d["next_pi"].notna()].copy()
+    tl  = Border(left=_s("medium","1C4587"), bottom=_s())
+    tlo = Border(left=_s("medium","1C4587"))
+
+    def _section(sub, seg_key, start_r):
+        _, seg_lt = SEG_COLORS.get(seg_key, SEG_COLORS["Overall"])
+        sec(ws, start_r, "PI Distribution & Movement", 16, seg=seg_key)
+        r = start_r + 1
+        n = len(sub)
+
+        # Tabel 1: distribution side by side
+        for i, h in enumerate(["PI Group","n Prev","n Cur","Delta"]):
+            sc(ws,r,1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+        for i, h in enumerate(["% Prev","% Cur","Delta %"]):
+            c = sc(ws,r,5+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+            if i==0: c.border = tlo
+        ws.row_dimensions[r].height = 22; r += 1
+
+        for lbl in PI_LBL:
+            nc = int((sub["pi_group_prev"].astype(str)==lbl).sum())
+            nn = int((sub["pi_group_cur"].astype(str)==lbl).sum())
+            dlt = nn - nc
+            sc(ws,r,1,lbl,ind=1,bdr=bb(),fs=9)
+            sc(ws,r,2,nc,align="right",fmt="#,##0",bdr=bb(),fs=9)
+            sc(ws,r,3,nn,align="right",fmt="#,##0",bdr=bb(),fs=9)
+            cd = ws.cell(row=r,column=4,value=dlt)
+            cd.number_format="+#,##0;-#,##0;-"
+            cd.font=Font(name="Calibri",size=9,
+                         color=GREEN_TXT if dlt>0 else (RED_TXT if dlt<0 else "000000"))
+            cd.alignment=Alignment(horizontal="right",vertical="center")
+            cd.border=bb()
+            cp1=sc(ws,r,5,nc/n if n>0 else 0,align="right",fmt="0.0%",
+                   bdr=Border(left=_s("medium","1C4587"),bottom=_s()),fs=9)
+            sc(ws,r,6,nn/n if n>0 else 0,align="right",fmt="0.0%",bdr=bb(),fs=9)
+            dpct = (nn-nc)/n if n>0 else 0
+            cp2=ws.cell(row=r,column=7,value=dpct)
+            cp2.number_format="+0.0%;-0.0%;-"
+            cp2.font=Font(name="Calibri",size=9,
+                          color=GREEN_TXT if dpct>0 else (RED_TXT if dpct<0 else "000000"))
+            cp2.alignment=Alignment(horizontal="right",vertical="center")
+            cp2.border=bb()
+            r += 1
+
+        sc(ws,r,1,"Total",bold=True,bg=NAVY,fc=WHITE,fs=9)
+        sc(ws,r,2,n,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+        sc(ws,r,3,n,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+        sc(ws,r,4,0,bold=True,bg=NAVY,fc=WHITE,align="right",fs=9)
+        c5=sc(ws,r,5,1.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        c5.border=Border(left=_s("medium",WHITE))
+        sc(ws,r,6,1.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        sc(ws,r,7,0.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        r += 2
+
+        # Tabel 2: movement matrix side by side
+        npl = len(PI_LBL)
+        off = npl + 2
+        for i, h in enumerate(["PI Prev \\ PI Cur"]+PI_LBL+["Total"]):
+            sc(ws,r,1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+        for i, h in enumerate(PI_LBL+["Total %"]):
+            c=sc(ws,r,off+1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+            if i==0: c.border=tlo
+        ws.row_dimensions[r].height=28; r+=1
+
+        mc = {}
+        for rl in PI_LBL:
+            mc[rl] = {cl: int(((sub["pi_group_prev"].astype(str)==rl)&
+                                (sub["pi_group_cur"].astype(str)==cl)).sum())
+                      for cl in PI_LBL}
+        ct_mv = {cl: sum(mc[rl][cl] for rl in PI_LBL) for cl in PI_LBL}
+
+        for rl in PI_LBL:
+            rt = sum(mc[rl].values())
+            sc(ws,r,1,rl,ind=1,bdr=bb(),fs=9)
+            for ci,cl in enumerate(PI_LBL):
+                v = mc[rl][cl]
+                od = (rl==cl)
+                md = PI_LBL.index(cl)<PI_LBL.index(rl)
+                bg = seg_lt if od else ("FFF0F0" if md and v>0 else "FFFFFF")
+                sc(ws,r,2+ci,v,bg=bg,align="right",fmt="#,##0",bdr=bb(),fs=9)
+            sc(ws,r,1+npl+1,rt,bold=True,bg="F0F3FA",align="right",fmt="#,##0",bdr=bb(),fs=9)
+            for ci,cl in enumerate(PI_LBL):
+                pv=mc[rl][cl]/n if n>0 else 0
+                od=(rl==cl); md=PI_LBL.index(cl)<PI_LBL.index(rl)
+                bg=seg_lt if od else ("FFF0F0" if md and mc[rl][cl]>0 else "FFFFFF")
+                c=sc(ws,r,off+1+ci,pv,bg=bg,align="right",fmt="0.0%",bdr=bb(),fs=9)
+                if ci==0: c.border=tl
+            sc(ws,r,off+1+npl,rt/n if n>0 else 0,bold=True,bg="F0F3FA",
+               align="right",fmt="0.0%",bdr=bb(),fs=9)
+            r+=1
+
+        sc(ws,r,1,"Total",bold=True,bg=NAVY,fc=WHITE,fs=9)
+        for ci,cl in enumerate(PI_LBL):
+            sc(ws,r,2+ci,ct_mv[cl],bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+        sc(ws,r,1+npl+1,n,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="#,##0",fs=9)
+        for ci,cl in enumerate(PI_LBL):
+            c=sc(ws,r,off+1+ci,ct_mv[cl]/n if n>0 else 0,
+                 bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+            if ci==0: c.border=Border(left=_s("medium",WHITE))
+        sc(ws,r,off+1+npl,1.0,bold=True,bg=NAVY,fc=WHITE,align="right",fmt="0.0%",fs=9)
+        r+=2
+
+        # Tabel 3: why moved
+        for i,h in enumerate(["Movement","n SKU","Avg Eff Price","Avg Eff Comp",
+                               "Avg Delta PI"]):
+            sc(ws,r,1+i,h,bold=True,bg=NAVY_LT,fc=WHITE,align="center",wrap=True,fs=9)
+        ws.row_dimensions[r].height=22; r+=1
+
+        sub2 = sub.copy()
+        sub2["pci"] = sub2["pi_group_prev"].astype(str).apply(
+            lambda x: PI_LBL.index(x) if x in PI_LBL else -1)
+        sub2["nci"] = sub2["pi_group_cur"].astype(str).apply(
+            lambda x: PI_LBL.index(x) if x in PI_LBL else -1)
+        sub2["mv"]  = sub2["nci"].astype(int) - sub2["pci"].astype(int)
+        ex2 = sub2[sub2["pi"].notna()&sub2["next_pi"].notna()].copy()
+
+        # Shapley
+        _comp0  = ex2["comp_price"].replace(0, np.nan)
+        _comp1  = ex2["next_comp_price"].replace(0, np.nan)
+        _pmid_B = ex2["next_price"] / _comp0 * 100
+        _pmid_D = ex2["price"] / _comp1 * 100
+        ex2["ep"]  = ((_pmid_B - ex2["pi"]) + (ex2["next_pi"] - _pmid_D)) / 2
+        ex2["ec"]  = ((ex2["next_pi"] - _pmid_B) + (_pmid_D - ex2["pi"])) / 2
+        ex2["dpi"] = ex2["next_pi"] - ex2["pi"]
+
+        for ri2,(lbl3,mask) in enumerate([
+            ("Naik 2+ bucket", ex2["mv"]>=2),
+            ("Naik 1 bucket",  ex2["mv"]==1),
+            ("Tetap",          ex2["mv"]==0),
+            ("Turun 1 bucket", ex2["mv"]==-1),
+            ("Turun 2+ bucket",ex2["mv"]<=-2),
+        ]):
+            sub3=ex2[mask]; nm=len(sub3)
+            bg="FFFFFF" if ri2%2==0 else "FAFBFF"
+            vals=[lbl3,nm,
+                  sub3["ep"].mean() if nm>0 else 0,
+                  sub3["ec"].mean() if nm>0 else 0,
+                  sub3["dpi"].mean() if nm>0 else 0]
+            for ci3,v in enumerate(vals,1):
+                fmt="#,##0" if ci3==2 else ("+#,##0.000;-#,##0.000;-" if ci3>2 else "General")
+                cell=ws.cell(row=r,column=ci3,value=v)
+                cell.number_format=fmt
+                cell.font=Font(name="Calibri",size=9,
+                               color=(RED_TXT if ci3>2 and isinstance(v,float) and v<-0.0001 else
+                                      (GREEN_TXT if ci3>2 and isinstance(v,float) and v>0.0001 else "000000")))
+                cell.fill=PatternFill("solid",fgColor=bg)
+                cell.alignment=Alignment(horizontal="right" if ci3>1 else "left",
+                                         vertical="center",indent=1 if ci3==1 else 0)
+                cell.border=bb()
+            r+=1
+        return r+2
+
+    r = _section(ex, "Overall", 1)
+    for seg in ["Dry","Fresh","Frozen"]:
+        r = _section(ex[ex["pricing_bl_25"]==seg], seg, r)
+
+    ws.column_dimensions["A"].width = 18
+    for i in range(2, 18):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    print(f"✅  Sheet 6 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# SHEET 10 — STRUCTURAL LOSS
+# ─────────────────────────────────────────────
+def build_s10(wb, d):
+    print("⏳  Sheet 10 — Structural Loss ...")
+    t0 = time.time()
+    ws = wb.create_sheet("10. Structural Loss")
+    ex = d[d["ci_cur"].notna() & d["next_pi"].notna() & d["margin_pct_cur"].notna()].copy()
+    cat_total = ex.groupby("l1_category_name").size().to_dict()
+    r = 1
+
+    for grp_label, grp_filter in [("COGS Index D (95-105)","D.95-105"),
+                                   ("COGS Index E (>105)","E.>105")]:
+        sec(ws, r, grp_label, 7)
+        r += 1
+        hdr(ws, r, ["L1 Category","n SKU","% of Category",
+                    "Avg COGS Index","Avg Margin %","Avg PI (current)"], h=24)
+        r += 1
+
+        sub = ex[ex["ci_group_cur"]==grp_filter].copy()
+        by_cat = sub.groupby("l1_category_name").agg(
+            n_sku=("product_id","count"),
+            avg_ci=("ci_cur","mean"),
+            avg_mg=("margin_pct_cur","mean"),
+            avg_pi=("next_pi","mean")
+        ).sort_values("n_sku",ascending=False).reset_index()
+
+        for _, row in by_cat.iterrows():
+            pct = row["n_sku"] / cat_total.get(row["l1_category_name"], 1)
+            bg  = "FFF0F0" if row["avg_ci"]>105 else "FFFFFF"
+            for ci,v in enumerate([row["l1_category_name"],int(row["n_sku"]),pct,
+                                    row["avg_ci"],row["avg_mg"],row["avg_pi"]],1):
+                fmt=("#,##0" if ci==2 else "0.0%" if ci in {3,5} else "#,##0.00")
+                sc(ws,r,ci,v,bg=bg,align="right" if ci>1 else "left",
+                   fmt=fmt,bdr=bb(),ind=1 if ci==1 else 0,fs=9)
+            r+=1
+
+        tot_n=int(len(sub))
+        for ci,v in enumerate(["TOTAL",tot_n,tot_n/len(ex) if len(ex)>0 else 0,
+                                sub["ci_cur"].mean(),sub["margin_pct_cur"].mean(),
+                                sub["next_pi"].mean()],1):
+            fmt=("#,##0" if ci==2 else "0.0%" if ci in {3,5} else "#,##0.00")
+            sc(ws,r,ci,v,bold=True,bg=NAVY,fc=WHITE,
+               align="right" if ci>1 else "left",fmt=fmt,fs=9)
+        r+=3
+
+    cw(ws,{"A":28,"B":10,"C":16,"D":16,"E":14,"F":16})
+    print(f"✅  Sheet 10 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# SHEET 11 — COGS NEED IMPROVE
+# ─────────────────────────────────────────────
+def build_s11(wb, d):
+    print("⏳  Sheet 11 — COGS Need Improve ...")
+    t0 = time.time()
+    ws = wb.create_sheet("11. COGS Need Improve")
+    ex = d[d["ci_group_cur"].isin(["D.95-105","E.>105"])].copy()
+    ex = ex.sort_values("ci_cur", ascending=False)
+
+    id_cols = ["product_id","product_name","l1_category_name",
+               "pricing_bl_25","pareto_classification","sku_type"]
+    met_cols = ["ci_group_cur","ci_cur","next_pi","margin_pct_cur",
+                "next_price","next_cogs","next_comp_price"]
+    all_cols = [c for c in id_cols+met_cols if c in ex.columns]
+
+    labels = {
+        "product_id":"Product ID","product_name":"Product Name",
+        "l1_category_name":"L1 Category","pricing_bl_25":"Pricing BL 25",
+        "pareto_classification":"Pareto","sku_type":"SKU Type",
+        "ci_group_cur":"COGS Idx Group","ci_cur":"COGS Index (cur)",
+        "next_pi":"PI (current)","margin_pct_cur":"Margin % (cur)",
+        "next_price":"Price (cur)","next_cogs":"COGS (cur)",
+        "next_comp_price":"Comp Price (cur)"
     }
-    CI_LBL_DISPLAY = {
-        "A.<70":   "A. <70",
-        "B.70-85": "B. 70-85",
-        "C.85-95": "C. 85-95",
-        "D.95-105":"D. 95-105",
-        "E.>105":  "E. >105",
+
+    hdr(ws, 1, [labels.get(c,c) for c in all_cols], h=28)
+    ws.freeze_panes = "A2"
+
+    pct_cols = {"margin_pct_cur"}
+    num_cols = {"ci_cur","next_pi","next_price","next_cogs","next_comp_price"}
+
+    for r_idx, row in enumerate(ex[all_cols].itertuples(index=False), 2):
+        is_e = str(getattr(row,"ci_group_cur",""))=="E.>105"
+        bg   = "FFF0F0" if is_e else "FFF8F0"
+        for ci, c_name in enumerate(all_cols, 1):
+            val = getattr(row, c_name, None)
+            if isinstance(val,float) and np.isnan(val): val=None
+            cell = ws.cell(row=r_idx, column=ci, value=val)
+            cell.font = Font(name="Calibri", size=9)
+            cell.fill = PatternFill("solid", fgColor=bg)
+            cell.alignment = Alignment(
+                horizontal="right" if c_name in pct_cols or c_name in num_cols else "left",
+                vertical="center", indent=1 if ci==1 else 0)
+            if c_name in pct_cols:    cell.number_format="0.0%"
+            elif c_name in num_cols:  cell.number_format="#,##0.00"
+        ws.row_dimensions[r_idx].height = 16
+
+    widths={"product_name":28,"l1_category_name":22,"pricing_bl_25":12,
+            "pareto_classification":14,"sku_type":14,"ci_group_cur":16,
+            "ci_cur":16,"next_pi":12,"margin_pct_cur":14,
+            "next_price":14,"next_cogs":12,"next_comp_price":16}
+    for ci,c in enumerate(all_cols,1):
+        ws.column_dimensions[get_column_letter(ci)].width=widths.get(c,12)
+
+    print(f"✅  Sheet 11 selesai ({time.time()-t0:.1f}s) — {len(ex):,} SKU")
+
+# ─────────────────────────────────────────────
+# SHEET 12 — FORMULA DOCUMENTATION
+# ─────────────────────────────────────────────
+def build_s12(wb, ov, sr):
+    print("⏳  Sheet 12 — Formula Documentation ...")
+    t0   = time.time()
+    ws   = wb.create_sheet("12. Formula")
+    segs = ["Dry","Fresh","Frozen"]
+
+    def _t(r, txt):
+        ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=6)
+        sc(ws,r,1,txt,bold=True,bg=NAVY,fc=WHITE,fs=11,ind=1)
+        ws.row_dimensions[r].height=22
+
+    def _s2(r, txt):
+        ws.merge_cells(start_row=r,start_column=1,end_row=r,end_column=6)
+        sc(ws,r,1,txt,bold=True,bg=LT_BLUE,fc=NAVY,fs=10,ind=1)
+        ws.row_dimensions[r].height=18
+
+    def _f(r, name, formula, note=""):
+        sc(ws,r,1,name,bold=True,fs=9,ind=1)
+        c2=ws.cell(row=r,column=2); c2.number_format="@"
+        c2.value=formula
+        c2.font=Font(name="Calibri",size=9,color=NAVY)
+        c2.alignment=Alignment(horizontal="left",vertical="center",wrap_text=True)
+        ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=5)
+        if note:
+            c6=ws.cell(row=r,column=6,value=note)
+            c6.font=Font(name="Calibri",italic=True,size=8,color=MUTED)
+            c6.alignment=Alignment(horizontal="left",vertical="center",wrap_text=True)
+        ws.row_dimensions[r].height=18
+
+    r=1
+    _t(r,"Dokumentasi Formula — PI Analysis"); r+=2
+
+    _s2(r,"A. Definisi Dasar"); r+=1
+    _f(r,"PI",           "price x 100 / comp_price"); r+=1
+    _f(r,"Margin",       "price - cogs"); r+=1
+    _f(r,"Margin %",     "(price - cogs) / price"); r+=1
+    _f(r,"COGS Index",   "cogs x 100 / comp_price",
+       "Proxy: kalau jual di harga comp, margin kita berapa?"); r+=1
+    _f(r,"Diff",         "current_value - prev_value",
+       "berlaku untuk price, cogs, comp, PI, margin"); r+=1
+    _f(r,"Diff %",       "diff / prev_value"); r+=2
+
+    _s2(r,"B. Konvensi Penamaan Periode"); r+=1
+    _f(r,"prev",    "Data periode lama (kolom asli: price, cogs, comp_price, pi, dst)"); r+=1
+    _f(r,"current", "Data periode terbaru (kolom asli: next_price, next_cogs, dst)"); r+=2
+
+    _s2(r,"C. Klasifikasi SKU"); r+=1
+    _f(r,"Existing SKU",  "pi NOT NULL  AND  next_pi NOT NULL", f"n={ov['n_ex']:,}"); r+=1
+    _f(r,"Departing SKU", "pi NOT NULL  AND  next_pi IS NULL",  f"n={ov['n_dep']:,}"); r+=1
+    _f(r,"New SKU",       "pi IS NULL   AND  next_pi NOT NULL", f"n={ov['n_new']:,}"); r+=2
+
+    _s2(r,"D. Tagging Up / Stay / Down"); r+=1
+    _f(r,"Up",   "delta_abs >= 5000  OR  delta_pct >= 5%"); r+=1
+    _f(r,"Down", "delta_abs <= -5000  OR  delta_pct <= -5%"); r+=1
+    _f(r,"Stay", "selain Up dan Down",
+       "berlaku untuk: price_tag, cogs_tag, comp_tag"); r+=2
+
+    _s2(r,"E. Status Labels"); r+=1
+    _f(r,"price_status", "Up=Price Increase | Stay=Price Stable | Down=Price Reduction"); r+=1
+    _f(r,"cogs_status",  "Up=Cost Pressure | Stay=Cost Stable | Down=Cost Improvement"); r+=1
+    _f(r,"comp_status",  "Up=Competitor Retreat | Stay=Market Stable | Down=Competitor Aggressive"); r+=2
+
+    _s2(r,"F. Framework Check (current period)"); r+=1
+    _f(r,"Cond 1","Fresh  AND  PI_current > 110  AND  margin_pct_current <= 15%"); r+=1
+    _f(r,"Cond 2","Frozen AND  PI_current > 100  AND  margin_pct_current <= 15%"); r+=1
+    _f(r,"Cond 3","Fresh  AND  PI_current > 120  AND  margin_pct_current >= 70%"); r+=1
+    _f(r,"Cond 4","Dry    AND  PI_current < 105  AND  margin_pct_current <= 0%"); r+=1
+    _f(r,"Cond 5","Dry    AND  PI_current > 120  AND  margin_pct_current > 40%"); r+=1
+    _f(r,"Result","TRUE if any condition met, blank otherwise"); r+=2
+
+    _s2(r,"G. PI Grouping"); r+=1
+    for lbl,rng in [("A.<95","PI < 95"),("B.95-<100","95 <= PI < 100"),
+                    ("C.100-105","100 <= PI < 105"),("D.105-110","105 <= PI < 110"),
+                    ("E.110-120","110 <= PI < 120"),("F.>120","PI >= 120")]:
+        _f(r,lbl,rng); r+=1
+    _f(r,"Applies to","pi_group_prev, pi_group_cur"); r+=2
+
+    _s2(r,"H. COGS Index Grouping"); r+=1
+    for lbl,rng in [("A.<70","CI < 70"),("B.70-85","70 <= CI < 85"),
+                    ("C.85-95","85 <= CI < 95"),("D.95-105","95 <= CI < 105"),
+                    ("E.>105","CI >= 105  →  Structural Loss if Competitive")]:
+        _f(r,lbl,rng); r+=1
+    r+=1
+
+    _s2(r,"I. Margin Grouping"); r+=1
+    for lbl,rng in [("A.<-20%","< -20%"),("B.-20to-10%","-20% to -10%"),
+                    ("C.-10to0%","-10% to 0%"),("D.0to10%","0% to 10%"),
+                    ("E.10to20%","10% to 20%"),("F.20to30%","20% to 30%"),
+                    ("G.30to50%","30% to 50%"),("H.>50%",">= 50%")]:
+        _f(r,lbl,rng); r+=1
+    r+=1
+
+    _s2(r,"J. Effect per Existing SKU (Shapley Value)"); r+=1
+    _f(r,"PI Mid B",       "next_price / comp_prev x 100",
+       "Titik tengah: harga kita T1, comp masih T0"); r+=1
+    _f(r,"PI Mid D",       "price_prev / comp_cur x 100",
+       "Titik tengah: comp T1, harga kita masih T0"); r+=1
+    _f(r,"Effect Price",   "((PI_mid_B - PI_prev) + (PI_cur - PI_mid_D)) / 2",
+       "Shapley: rata-rata dua urutan midpoint — zero residual, tidak ada order bias"); r+=1
+    _f(r,"Effect Comp (Total)", "((PI_cur - PI_mid_B) + (PI_mid_D - PI_prev)) / 2",
+       "Shapley: rata-rata dua urutan midpoint — Ep + Ec = ΔPI selalu exact"); r+=1
+    _f(r,"Δcomp",          "next_comp_price - comp_price",
+       "Total perubahan comp price (effective/discounted)"); r+=1
+    _f(r,"Δnormal_comp",   "next_normal_comp_price - normal_comp_price"); r+=1
+    _f(r,"Δdiscount_comp", "(next_normal_comp - next_comp) - (normal_comp - comp)",
+       "Perubahan besar diskon kompetitor antar periode"); r+=1
+    _f(r,"Effect Normal Comp",   "Effect Comp × (Δnormal_comp / Δcomp)",
+       "Jika Δcomp=0 maka =0. Ec_normal + Ec_discount = Ec_total exact"); r+=1
+    _f(r,"Effect Discount Comp", "Effect Comp × (Δdiscount_comp / Δcomp)",
+       "Bagian comp effect yang disebabkan perubahan agresivitas diskon kompetitor"); r+=2
+
+    _s2(r,"K. Waterfall Avg PI"); r+=1
+    _f(r,"A","Avg(PI_prev)     [existing + departing]"); r+=1
+    _f(r,"B","Avg(PI_prev)     [existing only]"); r+=1
+    _f(r,"C","Avg(PI_current)  [existing only]"); r+=1
+    _f(r,"D","Avg(PI_current)  [new SKU only]"); r+=1
+    _f(r,"E","(n_ex x C + n_new x D) / (n_ex + n_new)"); r+=1
+    _f(r,"eff_dep","B - A"); r+=1
+    _f(r,"eff_price","Avg(effect_price) [existing only] — Shapley"); r+=1
+    _f(r,"eff_comp (Total)", "Avg(effect_comp)  [existing only] — Shapley"); r+=1
+    _f(r,"eff_normal_comp",  "Avg(eff_comp × Δnormal_comp/Δcomp) [existing only]",
+       "Sub-effect: perubahan harga normal kompetitor"); r+=1
+    _f(r,"eff_discount_comp","Avg(eff_comp × Δdiscount_comp/Δcomp) [existing only]",
+       "Sub-effect: perubahan agresivitas diskon kompetitor"); r+=1
+    _f(r,"eff_new",  "E - C"); r+=2
+
+    _s2(r,"L. Kontribusi Exact ke Overall"); r+=1
+    _f(r,"price/comp","sum_effect_seg / n_ex_total",
+       "Exact karena sum of averages = average of all"); r+=1
+    _f(r,"departing",
+       "sum_pi_ex_seg/n_ex_total - sum_pi_cur_seg/n_cur_total",
+       "Fix dari bug lama: dua pool berbeda harus dihitung terpisah"); r+=1
+    _f(r,"new SKU",
+       "(sum_npi_ex_seg + sum_npi_new_seg)/n_next_total - sum_npi_ex_seg/n_ex_total",
+       "Fix dari bug lama: E dan C punya denominator berbeda"); r+=2
+
+    _s2(r,"M. SKU Count & Weight per Pricing BL 25"); r+=1
+    hdr(ws,r,["Segment","n Existing","n Departing","n New","n Current","n Next",
+              "w_existing","w_current","w_next"],h=20); r+=1
+
+    for seg in segs:
+        res=sr[seg]
+        vals=[seg,res["n_ex"],res["n_dep"],res["n_new"],res["n_cur"],res["n_next"],
+              res["n_ex"]/ov["n_ex"] if ov["n_ex"]>0 else 0,
+              res["n_cur"]/ov["n_cur"] if ov["n_cur"]>0 else 0,
+              res["n_ex"]/ov["n_next"] if ov["n_next"]>0 else 0]
+        for ci,v in enumerate(vals,1):
+            fmt="0.0%" if ci>6 else ("#,##0" if ci>1 else "General")
+            sc(ws,r,ci,v,align="right" if ci>1 else "left",fmt=fmt,ind=1 if ci==1 else 0,fs=9)
+        ws.row_dimensions[r].height=16; r+=1
+
+    vals=["OVERALL",ov["n_ex"],ov["n_dep"],ov["n_new"],ov["n_cur"],ov["n_next"],1.0,1.0,1.0]
+    for ci,v in enumerate(vals,1):
+        fmt="0.0%" if ci>6 else ("#,##0" if ci>1 else "General")
+        sc(ws,r,ci,v,bold=True,bg=NAVY,fc=WHITE,
+           align="right" if ci>1 else "left",fmt=fmt,fs=9)
+    ws.row_dimensions[r].height=16
+
+    cw(ws,{"A":26,"B":44,"C":14,"D":14,"E":14,"F":14})
+    print(f"✅  Sheet 12 selesai ({time.time()-t0:.1f}s)")
+
+# ─────────────────────────────────────────────
+# CALLABLE ENTRY POINT (refactored from main)
+# ─────────────────────────────────────────────
+def compute(df_raw):
+    """
+    Fast analytical computation only — NO Excel workbook generation.
+    Returns dict for Streamlit display (~3 seconds for 10K rows).
+
+    Args:
+        df_raw: pandas DataFrame with required raw columns
+
+    Returns:
+        dict with keys:
+            - df_enriched: enriched DataFrame (~+30 derived cols)
+            - period_type: 'week' or 'month'
+            - period_col, next_col: column names
+            - period_p1, period_p2: period labels (strings)
+            - overall: decompose() result for entire dataset
+            - segments: dict of decompose() per BL (Dry/Fresh/Frozen)
+            - contribs: exact_contributions() dict
+    """
+    period_type, period_col, next_col = detect_period(df_raw)
+    d = enrich(df_raw)
+    p1 = str(d[period_col].dropna().iloc[0])
+    p2 = str(d[next_col].dropna().iloc[0])
+    ov, sr, contribs = precompute(d)
+
+    return {
+        'df_enriched': d,
+        'period_type': period_type,
+        'period_col': period_col,
+        'next_col': next_col,
+        'period_p1': p1,
+        'period_p2': p2,
+        'overall': ov,
+        'segments': sr,
+        'contribs': contribs,
     }
-    PI_LBL_DISPLAY = {
-        "A.<95":     "A. <95",
-        "B.95-<100": "B. 95-100",
-        "C.100-105": "C. 100-105",
-        "D.105-110": "D. 105-110",
-        "E.110-120": "E. 110-120",
-        "F.>120":    "F. >120",
-    }
 
-    # ── FILTERS (3 controls) ──
-    flt_col1, flt_col2, flt_col3 = st.columns(3)
-    with flt_col1:
-        quad_scope = st.radio(
-            "Scope:",
-            ['Overall', 'Dry', 'Fresh', 'Frozen'],
-            horizontal=True,
-            key='pi_quad_scope'
-        )
-    with flt_col2:
-        quad_period = st.radio(
-            "PI period:",
-            ['Current (P2)', 'Prev (P1)'],
-            horizontal=True,
-            key='pi_quad_period'
-        )
-    with flt_col3:
-        quad_view = st.radio(
-            "View:",
-            ['Amount (SKU)', '% of Total'],
-            horizontal=True,
-            key='pi_quad_view'
-        )
 
-    # Filter dataframe
-    if quad_scope != 'Overall':
-        ex_only_q = df[(df['sku_type'] == 'Existing') & (df['pricing_bl_25'] == quad_scope)]
-    else:
-        ex_only_q = df[df['sku_type'] == 'Existing']
+def generate_excel(result):
+    """
+    Generate 13-sheet Excel workbook from compute() result.
+    SLOW (~50s for 10K rows) — only call when user requests download.
 
-    # Period suffix: '_prev' or '_cur'
-    p_suffix = '_prev' if quad_period == 'Prev (P1)' else '_cur'
-    pi_col = f'pi_group{p_suffix}'
-    mg_col = f'margin_group{p_suffix}'
-    ci_col = f'ci_group{p_suffix}'
+    Args:
+        result: dict returned from compute()
 
-    n_q_total = len(ex_only_q) if len(ex_only_q) > 0 else 1
+    Returns:
+        openpyxl Workbook
+    """
+    d = result['df_enriched']
+    period_col = result['period_col']
+    next_col = result['next_col']
+    ov = result['overall']
+    sr = result['segments']
+    contribs = result['contribs']
 
-    st.caption(f"**Scope: {quad_scope}** · **PI period: {quad_period}** · "
-               f"**View: {quad_view}** · {n_q_total:,} Existing SKU")
-    st.caption("📌 *Note: 'PI period' filter berlaku untuk tab 1-3. Tab 'PI Prev vs PI Cur Transition' selalu pakai Prev × Cur.*")
+    wb = Workbook()
+    build_s1(wb, d, period_col, next_col)
+    s1b_addr = build_s1b(wb, ov, sr, contribs)
+    build_s2(wb, s1b_addr, ov, sr, contribs)
+    build_s3(wb, d)
+    build_s4(wb, d)
+    build_s5(wb, d)
+    build_s6(wb, d)
+    build_s7(wb, d)
+    build_s8(wb, d)
+    build_s9(wb, d)
+    build_s10(wb, d)
+    build_s11(wb, d)
+    build_s12(wb, ov, sr)
 
-    quad_tabs = st.tabs([
-        "PI vs Margin",
-        "COGS Index vs PI",
-        "COGS Index vs Margin",
-        "🔁 PI Prev vs PI Cur (Transition)"
-    ])
+    return wb
 
-    def render_cross_matrix(cross, row_remap, col_remap, view_mode, n_total):
-        """Render cross-tab with label remap + Total row/col + gradient."""
-        # Remap labels (display only)
-        cross_disp = cross.copy()
-        cross_disp.index = [row_remap.get(i, i) for i in cross_disp.index]
-        cross_disp.columns = [col_remap.get(c, c) for c in cross_disp.columns]
 
-        if view_mode == 'Amount (SKU)':
-            # Add Total row + col
-            m = cross_disp.copy()
-            m['Total'] = m.sum(axis=1)
-            m.loc['TOTAL'] = m.sum(axis=0)
+def analyze(df_raw):
+    """
+    Legacy wrapper for backwards compatibility — runs compute() + generate_excel().
+    For Streamlit, prefer using compute() + generate_excel() separately.
+    """
+    result = compute(df_raw)
+    result['workbook'] = generate_excel(result)
+    return result
 
-            # Gradient based on non-Total cells only
-            inner = cross_disp.values
-            max_v = inner.max() if inner.size > 0 else 1
 
-            def style_amt(df_):
-                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
-                for i in df_.index:
-                    for c in df_.columns:
-                        if i == 'TOTAL' or c == 'Total':
-                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
-                        else:
-                            val = df_.loc[i, c]
-                            if pd.notna(val) and val > 0:
-                                alpha = min(1.0, val / max_v) if max_v > 0 else 0
-                                r = int(255 - (255-22) * alpha)
-                                g = int(255 - (255-163) * alpha)
-                                b = int(255 - (255-74) * alpha)
-                                styles.loc[i, c] = f'background-color: rgb({r},{g},{b}); color: #111827;'
-                return styles
+# ─────────────────────────────────────────────
+# CLI ENTRY (only when run directly)
+# ─────────────────────────────────────────────
+def main():
+    t_start = time.time()
+    filepath = select_file()
+    df_raw   = load_data(filepath)
+    result = analyze(df_raw)
+    d = result['df_enriched']
+    out_name = f"PI_Analysis_{result['period_type']}_{result['period_p1']}_vs_{result['period_p2']}.xlsx"
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), out_name)
+    print(f"\n💾  Menyimpan {out_name} ...")
+    t_save = time.time()
+    result['workbook'].save(out_path)
+    print(f"✅  Tersimpan ({time.time()-t_save:.1f}s)")
+    print(f"\n🎉  Selesai! Total waktu: {time.time()-t_start:.1f}s")
+    print(f"📄  Output: {out_name}")
 
-            st.dataframe(m.style.format("{:,}").apply(style_amt, axis=None),
-                         use_container_width=True)
-        else:
-            # % mode — % of n_total
-            pct = cross_disp / n_total * 100
-            pct_with_total = pct.copy()
-            pct_with_total['Total'] = pct_with_total.sum(axis=1)
-            pct_with_total.loc['TOTAL'] = pct_with_total.sum(axis=0)
-
-            inner_pct = pct.values
-            max_v = inner_pct.max() if inner_pct.size > 0 else 1
-
-            def style_pct(df_):
-                styles = pd.DataFrame('', index=df_.index, columns=df_.columns)
-                for i in df_.index:
-                    for c in df_.columns:
-                        if i == 'TOTAL' or c == 'Total':
-                            styles.loc[i, c] = 'background-color: #F3F4F6; font-weight: 700;'
-                        else:
-                            val = df_.loc[i, c]
-                            if pd.notna(val) and val > 0:
-                                alpha = min(1.0, val / max_v) if max_v > 0 else 0
-                                r = int(255 - (255-22) * alpha)
-                                g = int(255 - (255-163) * alpha)
-                                b = int(255 - (255-74) * alpha)
-                                styles.loc[i, c] = f'background-color: rgb({r},{g},{b}); color: #111827;'
-                return styles
-
-            st.dataframe(pct_with_total.style.format("{:.1f}%").apply(style_pct, axis=None),
-                         use_container_width=True)
-
-    with quad_tabs[0]:
-        if pi_col in ex_only_q.columns and mg_col in ex_only_q.columns:
-            cross1 = pd.crosstab(
-                ex_only_q[pi_col],
-                ex_only_q[mg_col]
-            ).reindex(index=PI_BINS_LBL, columns=MG_BINS_LBL, fill_value=0)
-            st.markdown(f"**PI Bucket (rows) × Margin Bucket (cols)**")
-            render_cross_matrix(cross1, PI_LBL_DISPLAY, MG_LBL_DISPLAY, quad_view, n_q_total)
-            st.caption("💡 High PI + Low Margin = uncompetitive + low profit (double whammy). "
-                      "Low PI + High Margin = good underpriced position (room to test price up).")
-
-    with quad_tabs[1]:
-        if ci_col in ex_only_q.columns and pi_col in ex_only_q.columns:
-            cross2 = pd.crosstab(
-                ex_only_q[ci_col],
-                ex_only_q[pi_col]
-            ).reindex(index=CI_BINS_LBL, columns=PI_BINS_LBL, fill_value=0)
-            st.markdown(f"**COGS Index (rows) × PI Bucket (cols)**")
-            render_cross_matrix(cross2, CI_LBL_DISPLAY, PI_LBL_DISPLAY, quad_view, n_q_total)
-            st.caption("💡 High CI (D/E) + High PI = structurally over-priced (cost lebih mahal dari comp + jual lebih mahal). "
-                      "Vendor negotiation needed.")
-
-    with quad_tabs[2]:
-        if ci_col in ex_only_q.columns and mg_col in ex_only_q.columns:
-            cross3 = pd.crosstab(
-                ex_only_q[ci_col],
-                ex_only_q[mg_col]
-            ).reindex(index=CI_BINS_LBL, columns=MG_BINS_LBL, fill_value=0)
-            st.markdown(f"**COGS Index (rows) × Margin Bucket (cols)**")
-            render_cross_matrix(cross3, CI_LBL_DISPLAY, MG_LBL_DISPLAY, quad_view, n_q_total)
-            st.caption("💡 High CI (D/E) + Low Margin = structural loss (cost mahal + margin tipis).")
-
-    # ── Tab 4: PI Prev → PI Cur Transition Matrix ──
-    with quad_tabs[3]:
-        st.markdown(f"**PI Bucket Prev (rows, P1) × PI Bucket Cur (cols, P2)** — SKU movement antar bucket")
-        # Note: transition matrix ignores quad_period filter (always uses Prev × Cur)
-        # but respects quad_scope and quad_view
-        if 'pi_group_prev' in ex_only_q.columns and 'pi_group_cur' in ex_only_q.columns:
-            cross_trans = pd.crosstab(
-                ex_only_q['pi_group_prev'],
-                ex_only_q['pi_group_cur']
-            ).reindex(index=PI_BINS_LBL, columns=PI_BINS_LBL, fill_value=0)
-            render_cross_matrix(cross_trans, PI_LBL_DISPLAY, PI_LBL_DISPLAY, quad_view, n_q_total)
-
-            # Movement summary
-            n_total_trans = int(cross_trans.values.sum())
-            n_diag = int(sum(cross_trans.iloc[i, i] for i in range(len(PI_BINS_LBL))))
-            n_off = n_total_trans - n_diag
-
-            # Direction (upper triangle = moved to higher bucket = more expensive vs comp; lower triangle = inverse)
-            n_up = int(sum(cross_trans.iloc[i, j] for i in range(len(PI_BINS_LBL))
-                                                  for j in range(len(PI_BINS_LBL)) if j > i))
-            n_down = int(sum(cross_trans.iloc[i, j] for i in range(len(PI_BINS_LBL))
-                                                    for j in range(len(PI_BINS_LBL)) if j < i))
-
-            st.caption(
-                f"💡 **Diagonal** (stay di bucket sama): **{n_diag:,}** SKU "
-                f"({n_diag/n_total_trans*100:.1f}%). "
-                f"**Off-diagonal** (shift): **{n_off:,}** SKU. "
-                f"Upper triangle (PI naik = lebih mahal vs comp): **{n_up:,}**. "
-                f"Lower triangle (PI turun = lebih kompetitif): **{n_down:,}**."
-            )
-            st.caption(
-                "**Interpretation:** Pola transition kasih insight macro tentang shift positioning portfolio Astro. "
-                "Mayoritas di diagonal = portfolio stabil. Banyak movement ke bawah-kiri = portfolio jadi lebih kompetitif. "
-                "Banyak movement ke atas-kanan = portfolio jadi lebih premium / mahal."
-            )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 9 — FRAMEWORK CHECK
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">9️⃣ Framework Check — Actionable SKU List</div>',
-                unsafe_allow_html=True)
-    st.caption("SKU yang trigger business rules untuk repricing. Definisi 5 rules: lihat caption per row.")
-
-    fc_df = build_framework_check_table(df)
-    if fc_df.empty:
-        st.info("✅ Tidak ada SKU yang trigger framework rules.")
-    else:
-        # Summary by rule
-        rule_summary = fc_df['Rule'].value_counts().reset_index()
-        rule_summary.columns = ['Rule', 'Count']
-        st.markdown(f"**Total {len(fc_df)} SKU trigger framework. Breakdown:**")
-        st.dataframe(rule_summary, hide_index=True, use_container_width=True)
-
-        # Detail SKU di-hide dulu — expand on click
-        with st.expander(f"📋 Detail SKU ({len(fc_df)} rows) — Klik untuk tampilkan", expanded=False):
-            fc_disp = fc_df.copy()
-            if 'pi' in fc_disp.columns:
-                fc_disp['pi'] = fc_disp['pi'].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
-                fc_disp['next_pi'] = fc_disp['next_pi'].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
-                fc_disp['diff_pi'] = fc_disp['diff_pi'].apply(lambda v: f"{v:+.2f}" if pd.notna(v) else "—")
-            for c in ['margin_pct_prev', 'margin_pct_cur']:
-                if c in fc_disp.columns:
-                    fc_disp[c] = fc_disp[c].apply(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "—")
-            for c in ['price', 'next_price', 'cogs', 'next_cogs', 'comp_price', 'next_comp_price']:
-                if c in fc_disp.columns:
-                    fc_disp[c] = fc_disp[c].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-            st.dataframe(fc_disp, use_container_width=True, hide_index=True, height=500)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 10 — STRUCTURAL LOSS + COGS NEED IMPROVE
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">🔟 Structural Loss & COGS Need Improve</div>',
-                unsafe_allow_html=True)
-    st.caption("L1 categories dengan banyak SKU di CI Group D/E (cost mahal vs comp) — procurement action needed.")
-
-    # ── 10A: Structural Loss by L1 Category ──
-    st.markdown("##### 📋 Structural Loss by L1 Category")
-    st.caption("L1 dengan SKU di CI Group D (95-105) atau E (>105) — cost lebih mahal dari competitor. "
-              "Sort by n SKU desc.")
-    sl_df = build_structural_loss(df)
-    if sl_df.empty:
-        st.info("Tidak ada L1 di CI Group D/E.")
-    else:
-        sl_disp = sl_df.copy()
-        sl_disp['% of Category'] = sl_disp['% of Category'].apply(lambda v: f"{v*100:.1f}%")
-        sl_disp['Avg COGS Index'] = sl_disp['Avg COGS Index'].apply(lambda v: f"{v:.1f}")
-        sl_disp['Avg Margin %'] = sl_disp['Avg Margin %'].apply(lambda v: f"{v*100:.1f}%")
-        sl_disp['Avg PI (Cur)'] = sl_disp['Avg PI (Cur)'].apply(lambda v: f"{v:.1f}")
-        sl_disp['n SKU'] = sl_disp['n SKU'].apply(lambda v: f"{v:,}")
-        st.dataframe(sl_disp, use_container_width=True, hide_index=True, height=400)
-
-    # ── 10B: COGS Need Improve — SKU summary ──
-    st.markdown("##### 📋 COGS Need Improve — SKU Summary by BL × L1")
-    ci_df = build_cogs_need_improve(df)
-    if ci_df.empty:
-        st.info("Tidak ada SKU di CI D/E.")
-    else:
-        # Enriched summary: BL × L1, with margin avg, PI avg, CI avg
-        ci_summary = ci_df.groupby(['pricing_bl_25', 'l1_category_name']).agg(
-            n_sku=('product_id', 'count'),
-            avg_ci=('ci_cur', 'mean'),
-            avg_pi=('next_pi', 'mean'),
-            avg_mg=('margin_pct_cur', 'mean'),
-        ).reset_index()
-        ci_summary.columns = ['BL', 'L1 Category', 'n SKU', 'Avg COGS Index', 'Avg PI (Cur)', 'Avg Margin %']
-        ci_summary = ci_summary.sort_values('n SKU', ascending=False)
-
-        # Display summary
-        ci_disp = ci_summary.copy()
-        ci_disp['n SKU'] = ci_disp['n SKU'].apply(lambda v: f"{v:,}")
-        ci_disp['Avg COGS Index'] = ci_disp['Avg COGS Index'].apply(lambda v: f"{v:.1f}")
-        ci_disp['Avg PI (Cur)'] = ci_disp['Avg PI (Cur)'].apply(lambda v: f"{v:.1f}")
-        ci_disp['Avg Margin %'] = ci_disp['Avg Margin %'].apply(lambda v: f"{v*100:.1f}%")
-        st.caption(f"Total **{len(ci_df):,} SKU** need COGS improvement (CI Group D + E).")
-        st.dataframe(ci_disp, use_container_width=True, hide_index=True, height=400)
-
-        # Optional detail SKU list (hidden behind expander)
-        with st.expander(f"📋 Detail SKU list ({len(ci_df):,} rows) — klik untuk tampilkan", expanded=False):
-            ci_detail = ci_df.copy()
-            for c in ['ci_cur', 'next_pi']:
-                if c in ci_detail.columns:
-                    ci_detail[c] = ci_detail[c].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
-            if 'margin_pct_cur' in ci_detail.columns:
-                ci_detail['margin_pct_cur'] = ci_detail['margin_pct_cur'].apply(
-                    lambda v: f"{v*100:.1f}%" if pd.notna(v) else "—"
-                )
-            for c in ['next_price', 'next_cogs', 'next_comp_price']:
-                if c in ci_detail.columns:
-                    ci_detail[c] = ci_detail[c].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
-            st.dataframe(ci_detail, use_container_width=True, hide_index=True, height=500)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ZONE 11 — PARETO CLASS MOVEMENT
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">1️⃣1️⃣ Pareto Class Movement</div>', unsafe_allow_html=True)
-    st.caption("PI movement per Pareto class (A/B/C) — strategic view by SKU importance.")
-
-    pareto_scope = st.radio(
-        "Scope Pareto:",
-        ['Overall', 'Dry', 'Fresh', 'Frozen'],
-        horizontal=True,
-        key='pi_pareto_scope'
-    )
-    pareto_table = build_pareto_pi_table(df, scope=pareto_scope)
-    if pareto_table.empty:
-        st.info("Tidak ada data Pareto.")
-    else:
-        pareto_display = pareto_table.copy()
-        for c in ['Avg PI Prev (A)', 'Avg PI Cur (E)']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—")
-        for c in ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                  '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{v:+.3f}" if pd.notna(v) else "—")
-        for c in ['n Existing', 'n Departing', 'n New']:
-            pareto_display[c] = pareto_display[c].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "—")
-
-        effect_cols_p = ['Total Δ', '1. Churned Eff', '2. Price Eff', '3. Comp Price Eff',
-                        '3.1 Normal Comp Eff', '3.2 Discount Comp Eff', '4. New SKU Eff']
-        vals = pareto_table[effect_cols_p].values.flatten()
-        vals = [v for v in vals if pd.notna(v)]
-        vmax = max(abs(v) for v in vals) if vals else 1
-        if vmax == 0: vmax = 1
-
-        def apply_pareto_style(row):
-            styles = []
-            for col in pareto_display.columns:
-                if col in effect_cols_p:
-                    v = pareto_table.loc[row.name, col]
-                    styles.append(gradient_color(v, vmax))
-                else:
-                    styles.append('')
-            return styles
-
-        st.dataframe(
-            pareto_display.style.apply(apply_pareto_style, axis=1),
-            use_container_width=True, hide_index=True
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # DOWNLOAD EXCEL (LAZY — only build when user clicks)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">📥 Download Full Report</div>', unsafe_allow_html=True)
-    st.caption("Download complete 13-sheet Excel report (sama persis output script pi_analyzer_v1.py). "
-               "Build Excel akan butuh ~50-60 detik karena ada styling per-cell. Klik tombol di bawah saat lo butuh.")
-
-    out_name = f"PI_Analysis_{result['period_type']}_{period_p1}_vs_{period_p2}.xlsx"
-
-    # Lazy generation: only build Excel when user clicks "Prepare Excel"
-    if 'pi_excel_ready' not in st.session_state:
-        st.session_state.pi_excel_ready = False
-
-    if not st.session_state.pi_excel_ready:
-        if st.button("🔨 Build Excel Report (~60s)", type="primary", key='pi_excel_prepare'):
-            with st.spinner("Building 13-sheet Excel workbook... ini bisa makan ~60 detik."):
-                try:
-                    excel_bytes = cached_pi_excel_bytes(
-                        st.session_state.pi_file_bytes,
-                        st.session_state.pi_uploaded_file_name
-                    )
-                    st.session_state.pi_excel_bytes = excel_bytes
-                    st.session_state.pi_excel_ready = True
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Excel build error: {e}")
-                    st.exception(e)
-    else:
-        st.success("✅ Excel report ready. Click below to download.")
-        st.download_button(
-            "📥 Download Excel (13 sheets)",
-            data=st.session_state.pi_excel_bytes,
-            file_name=out_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=False,
-            key='pi_excel_download'
-        )
-        if st.button("🔄 Rebuild Excel", type="secondary", key='pi_excel_rebuild'):
-            st.session_state.pi_excel_ready = False
-            if 'pi_excel_bytes' in st.session_state:
-                del st.session_state.pi_excel_bytes
-            st.rerun()
-
-else:
-    st.info("⬆️ Upload file PI raw data untuk mulai analisis. Format mengikuti `pi_analyzer_v1.py`.")
+if __name__ == "__main__":
+    main()
