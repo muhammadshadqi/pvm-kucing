@@ -315,6 +315,107 @@ LEFT JOIN pareto p ON d.product_id = p.product_id
 """
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PAGE 3 QUERY TEMPLATE — single date range, no weekday picker
+# Placeholders: __START_DATE__, __END_DATE__
+# ═══════════════════════════════════════════════════════════════════════════
+PAGE3_QUERY_TEMPLATE = """WITH 
+date_dict as (
+select
+date('__START_DATE__') start_date,
+date('__END_DATE__') end_date
+)
+
+,raw1_dim_prod AS(
+SELECT product_id, product_name, l1_category_name, l2_category_name,
+  `astro-data-prd.astro_function.business_lines_2025`(private_label_or_retail, pr.l1_category_name, pr.food_or_non_food, pr.product_type_name) business_lines_2025,
+FROM `astro-data-prd.astro_dataset.dim_products_x_categories_x_attributes` pr
+GROUP BY ALL 
+) 
+
+,dim_prod AS(SELECT product_id,
+CASE 
+WHEN REGEXP_CONTAINS(LOWER(l1_category_name), r'ayam|unggas|seafood|daging beku') THEN 'Frozen'
+WHEN REGEXP_CONTAINS(LOWER(l1_category_name), r'buah|sayur|telur|tahu|tempe') THEN 'Fresh'
+WHEN REGEXP_CONTAINS(LOWER(business_lines_2025), r'ab|ag|ak') THEN 'PL'
+WHEN REGEXP_CONTAINS(LOWER(business_lines_2025), r'dry food|dry non food') THEN 'Dry'
+ELSE 'Others'
+END AS pricing_bl_25,
+product_name, l1_category_name, l2_category_name,
+FROM raw1_dim_prod GROUP BY ALL
+)
+
+
+-------------------------------|| Comp Price Blended ||---------------------------------------------
+,raw_main AS(  
+SELECT DATE_TRUNC(date_key,MONTH) month_key, date_key,
+  DATE_TRUNC(DATE_ADD(date_key, INTERVAL 0 DAY), WEEK(MONDAY)) + 0 week_key,
+  product_id, dp.product_name, dp.l1_category_name, pricing_bl_25,
+  selling_price AS price,  comp_price_mapping comp_price,
+FROM astro-data-prd.astro_datamart_buyer_exp.rpt_pricing_suggested_price_simulation  
+LEFT JOIN dim_prod dp USING(product_id)
+WHERE date_key between (select distinct date(start_date) from date_dict) and (select distinct date(end_date) from date_dict)
+AND pi <> 0 AND pi IS NOT NULL AND converted_type = 'overall'  AND pricing_bl_25 NOT IN ('PL','Dry')
+GROUP BY ALL
+
+UNION ALL    
+
+SELECT DATE_TRUNC(date_key,MONTH) month_key, date_key,
+  DATE_TRUNC(DATE_ADD(date_key, INTERVAL 0 DAY), WEEK(MONDAY)) + 0 week_key,
+  product_id, dp.product_name, dp.l1_category_name, pricing_bl_25,
+  selling_price AS price, comp_price_mapping comp_price,
+FROM astro-data-prd.astro_datamart_buyer_exp.rpt_pricing_suggested_price_simulation  
+LEFT JOIN dim_prod dp USING(product_id)
+WHERE date_key between (select distinct date(start_date) from date_dict) and (select distinct date(end_date) from date_dict)
+AND pi <> 0 AND pi IS NOT NULL AND converted_type = 'exact match'  AND pricing_bl_25 IN ('Dry')
+GROUP BY ALL
+)
+
+,avg_comp_price AS(SELECT product_id,
+  AVG(price) price, AVG(comp_price) comp_price FROM raw_main GROUP BY ALL)
+
+,last_day_comp_price AS(SELECT date_key, product_id,
+  price price, comp_price comp_price FROM raw_main QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY date_key DESC) = 1)
+
+
+
+
+,pnl AS(
+SELECT DISTINCT
+    a.product_id, dp.product_name, dp.l1_category_name, dp.l2_category_name,
+    pricing_bl_25,
+    SUM(a.quantity_sold) AS qty,
+    SAFE_DIVIDE(SUM(goods_value), SUM(a.quantity_sold)) AS selling_price,
+    SAFE_DIVIDE(SUM(total_cogs), SUM(a.quantity_sold)) AS cost_price,
+FROM astro-data-prd.astro_datamart.rpt_gross_margin a
+LEFT JOIN dim_prod dp ON a.product_id = dp.product_id
+WHERE a.date_key BETWEEN (SELECT DATE(start_date) FROM date_dict) AND (SELECT DATE(end_date) FROM date_dict)
+AND order_id_sales is not null AND a.goods_value > 0
+AND a.location_type = 'overall' AND order_type not in ('KITCHEN')
+GROUP BY ALL
+)
+
+SELECT 
+product_id, 
+product_name ,
+l1_category_name,
+l2_category_name, 
+pricing_bl_25,
+qty,
+selling_price,
+cost_price, 
+b.comp_price AS avg_comp_price, 
+c.comp_price AS last_comp_price,
+c.price AS last_price
+
+FROM pnl a
+LEFT JOIN avg_comp_price b
+USING(product_id)
+LEFT JOIN last_day_comp_price c
+USING(product_id)
+"""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,6 +437,65 @@ def list_dates_with_weekday(year, month, weekday_idx):
     cal = calendar.Calendar()
     return [d for d in cal.itermonthdates(year, month)
             if d.month == month and d.weekday() == weekday_idx]
+
+
+def render_date_range_query(query_label, query_template, key_prefix):
+    """Render UI for queries that need ONLY a start_date and end_date (no weekday picker)."""
+
+    st.markdown(f"##### ⚙️ Konfigurasi {query_label}")
+
+    today = dt.date.today()
+    default_start = (today - dt.timedelta(days=30)).replace(day=1)  # 1st of last month
+    default_end = today
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input(
+            "Start Date:",
+            value=default_start,
+            key=f'{key_prefix}_start_dr',
+            help="Tanggal awal range"
+        )
+    with c2:
+        end_date = st.date_input(
+            "End Date:",
+            value=default_end,
+            key=f'{key_prefix}_end_dr',
+            help="Tanggal akhir range"
+        )
+
+    # Validation
+    if end_date < start_date:
+        st.error(f"❌ End Date ({end_date}) harus ≥ Start Date ({start_date})")
+        return
+
+    n_days = (end_date - start_date).days + 1
+
+    # Preview
+    st.markdown('<div class="info-box">', unsafe_allow_html=True)
+    st.markdown(
+        f"📌 **Preview parameters:**<br>"
+        f"• Start Date: <code>{start_date.strftime('%Y-%m-%d')}</code><br>"
+        f"• End Date: <code>{end_date.strftime('%Y-%m-%d')}</code><br>"
+        f"• Range total: <code>{n_days}</code> hari",
+        unsafe_allow_html=True
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Generate query
+    generated_sql = (
+        query_template
+        .replace('__START_DATE__', start_date.strftime('%Y-%m-%d'))
+        .replace('__END_DATE__', end_date.strftime('%Y-%m-%d'))
+    )
+
+    st.markdown("##### 📝 Generated SQL Query")
+    st.caption("Hover pada code block → klik icon copy (📋) di pojok kanan atas untuk salin query.")
+    st.code(generated_sql, language='sql')
+
+    n_lines = len(generated_sql.splitlines())
+    n_chars = len(generated_sql)
+    st.caption(f"📊 {n_lines:,} lines · {n_chars:,} characters")
 
 
 def render_query_builder(query_label, query_template, key_prefix):
@@ -489,7 +649,7 @@ st.markdown("""
 tab_pvm, tab_pi, tab_p3 = st.tabs([
     "📊 Query 1 — PVM",
     "📈 Query 2 — PI",
-    "🔮 Query 3 — Page 3 (Coming Soon)"
+    "📅 Query 3 — Page 3 (Date Range)"
 ])
 
 with tab_pvm:
@@ -505,9 +665,10 @@ with tab_pi:
     render_query_builder("PI", PI_QUERY_TEMPLATE, "pi")
 
 with tab_p3:
-    st.markdown('<div class="section-header">🔮 Page 3 Query — Coming Soon</div>', unsafe_allow_html=True)
-    st.info(
-        "⏳ Query untuk Page 3 belum tersedia. Kasih tau gue kalau Page 3 sudah ada — "
-        "gue akan tambahkan template query-nya di sini dengan struktur yang sama "
-        "(weekday picker + start/next week picker + auto-generate)."
+    st.markdown('<div class="section-header">📅 Page 3 Query — Date Range Analysis</div>', unsafe_allow_html=True)
+    st.caption(
+        "Query untuk Page 3. Berbeda dari Query 1 & 2: cuma 1 periode (date range) "
+        "dengan output `qty`, `selling_price`, `cost_price`, `avg_comp_price`, `last_comp_price`, dan `last_price`. "
+        "Cocok untuk monthly/quarterly analysis per SKU."
     )
+    render_date_range_query("Page 3", PAGE3_QUERY_TEMPLATE, "p3")
