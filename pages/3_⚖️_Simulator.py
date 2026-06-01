@@ -529,172 +529,180 @@ if st.session_state.sim_result is not None:
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">3️⃣ Executive Summary</div>', unsafe_allow_html=True)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 3A — IMPACT KE OVERALL ASTRO (full File-1 universe; only changed SKU move)
-    # ═══════════════════════════════════════════════════════════════════════
     O = st.session_state.get('sim_overall')
-    if O is not None and not O['overall'].empty:
+    baseline_row = summary[summary['scenario'] == 'baseline'].iloc[0]
+
+    # ── Helper: pair table (Baseline vs ONE variant) with Diff & Diff% ──
+    def pair_table(rows, label_col, label_title, v, value_kind='money'):
+        """
+        rows: list of dicts, each must have label_col, 'gv_baseline','gp_baseline',
+              'gp_pct_baseline', and the same for variant v.
+        Builds a tidy df: <label> | Baseline | <v> | Diff | Diff% per metric block.
+        Returns a styled df for GV, GP, GP%.
+        """
+        out = []
+        for r in rows:
+            base_gv, var_gv = r['gv_baseline'], r[f'gv_{v}']
+            base_gp, var_gp = r['gp_baseline'], r[f'gp_{v}']
+            base_pct = r['gp_pct_baseline']; var_pct = r[f'gp_pct_{v}']
+            out.append({
+                label_title: r[label_col],
+                'GV Baseline': base_gv, f'GV {v}': var_gv,
+                'GV Diff': var_gv - base_gv,
+                'GV Diff%': (var_gv - base_gv) / base_gv if base_gv else np.nan,
+                'GP Baseline': base_gp, f'GP {v}': var_gp,
+                'GP Diff': var_gp - base_gp,
+                'GP Diff%': (var_gp - base_gp) / base_gp if base_gp else np.nan,
+                'GP% Baseline': base_pct, f'GP% {v}': var_pct,
+                'GP% Diff (pp)': var_pct - base_pct,
+            })
+        df_pair = pd.DataFrame(out)
+        fmt = {
+            'GV Baseline': '{:,.0f}', f'GV {v}': '{:,.0f}', 'GV Diff': '{:+,.0f}', 'GV Diff%': '{:+.1%}',
+            'GP Baseline': '{:,.0f}', f'GP {v}': '{:,.0f}', 'GP Diff': '{:+,.0f}', 'GP Diff%': '{:+.1%}',
+            'GP% Baseline': '{:.1%}', f'GP% {v}': '{:.1%}', 'GP% Diff (pp)': '{:+.2%}',
+        }
+
+        def _color(val):
+            if isinstance(val, (int, float)) and not pd.isna(val):
+                if val > 0: return 'color: #16a34a'
+                if val < 0: return 'color: #dc2626'
+            return ''
+        diff_cols = ['GV Diff', 'GV Diff%', 'GP Diff', 'GP Diff%', 'GP% Diff (pp)']
+        sty = df_pair.style.format(fmt, na_rep='—').map(_color, subset=diff_cols)
+        return sty
+
+    if O is None or O['overall'].empty:
+        st.info("Edit minimal 1 SKU untuk melihat Executive Summary.")
+    else:
         ov = O['overall'].set_index('scenario')
         ov_base = ov.loc['baseline']
         n_total   = int(ov_base['n_sku_total'])
         n_changed = int(ov_base['n_sku_changed'])
 
-        st.markdown(f"##### 🏢 Impact ke Overall Astro")
-        st.caption(f"Basis: seluruh {n_total:,} SKU di File 1 (semua penjualan dalam range). "
-                   f"Hanya {n_changed:,} SKU yang harganya diubah — sisanya tetap di harga asli. "
-                   f"Ini dampak repricing lo ke total Astro.")
-
-        # Baseline reference (overall)
-        ob1, ob2, ob3, ob4 = st.columns(4)
-        with ob1:
-            st.markdown(kpi_card("Overall GV (baseline)", fmt_money(ov_base['gv'])), unsafe_allow_html=True)
-        with ob2:
-            st.markdown(kpi_card("Overall GP (baseline)", fmt_money(ov_base['gp'])), unsafe_allow_html=True)
-        with ob3:
-            st.markdown(kpi_card("Overall GP% (baseline)", fmt_pct(ov_base['gp_pct'])), unsafe_allow_html=True)
-        with ob4:
-            st.markdown(kpi_card("SKU diubah", f"{n_changed:,}",
-                                  sub=f"dari {n_total:,} total SKU"), unsafe_allow_html=True)
-
-        # Per-variant impact on overall
-        for v in variant_cols:
-            ov_v = ov.loc[v]
-            d_gv     = ov_v['gv'] - ov_base['gv']
-            d_gp     = ov_v['gp'] - ov_base['gp']
-            d_gp_pct = ov_v['gp_pct'] - ov_base['gp_pct']
-            # % share of impact vs baseline GP (how big is the dent in total Astro GP)
-            share_gp = d_gp / ov_base['gp'] if ov_base['gp'] else np.nan
-
-            st.markdown(f"**↓ Impact `{v}` ke Overall Astro**")
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.markdown(kpi_card(f"Overall GV — {v}", fmt_money(ov_v['gv']),
-                                      delta=d_gv, delta_label=fmt_money_delta(d_gv)),
-                            unsafe_allow_html=True)
-            with c2:
-                st.markdown(kpi_card(f"Overall GP — {v}", fmt_money(ov_v['gp']),
-                                      delta=d_gp, delta_label=fmt_money_delta(d_gp)),
-                            unsafe_allow_html=True)
-            with c3:
-                st.markdown(kpi_card(f"Overall GP% — {v}", fmt_pct(ov_v['gp_pct']),
-                                      delta=d_gp_pct, delta_label=fmt_pct_delta(d_gp_pct)),
-                            unsafe_allow_html=True)
-            with c4:
-                st.markdown(kpi_card(f"Δ GP share — {v}", fmt_pct(share_gp) if pd.notna(share_gp) else "—",
-                                      sub="Δ GP ÷ GP Astro baseline"),
-                            unsafe_allow_html=True)
-
-        # ── Pricing BL terdampak ──
-        st.markdown("##### 🧱 Pricing BL Terdampak")
-        st.caption("Agregat seluruh SKU per BL; hanya BL yang punya SKU diubah yang bergerak. "
-                   "BL dengan Δ = 0 berarti tidak ada SKU yang lo ubah di situ.")
-        by_bl = O['by_bl']
-        if not by_bl.empty:
-            bl_show_cols = ['pricing_bl_25', 'n_sku_total', 'n_sku_changed']
-            for s in O['scenarios']:
-                bl_show_cols += [f'gv_{s}', f'gp_{s}', f'gp_pct_{s}']
-            for v in variant_cols:
-                bl_show_cols += [f'd_gv_{v}', f'd_gp_{v}', f'd_gp_pp_{v}']
-            bl_show_cols = [c for c in bl_show_cols if c in by_bl.columns]
-            fmt = {}
-            for c in bl_show_cols:
-                if 'gp_pct' in c: fmt[c] = '{:.1%}'
-                elif 'd_gp_pp' in c: fmt[c] = '{:+.2%}'
-                elif c.startswith('d_'): fmt[c] = '{:+,.0f}'
-                elif c.startswith('gv_') or c.startswith('gp_'): fmt[c] = '{:,.0f}'
-                elif c.startswith('n_sku'): fmt[c] = '{:,}'
-            st.dataframe(by_bl[bl_show_cols].style.format(fmt, na_rep='—'),
-                         use_container_width=True, hide_index=True)
-
-        # ── L1 terdampak (only those with a changed SKU) ──
-        st.markdown("##### 🗂️ L1 Category Terdampak")
-        st.caption("Hanya L1 yang punya minimal 1 SKU diubah. Angka = agregat seluruh SKU di L1 itu.")
+        # ── BUILD DYNAMIC LENS OPTIONS ──
+        by_bl_o = O['by_bl']
         by_l1_o = O['by_l1']
-        if not by_l1_o.empty:
-            touched = by_l1_o[by_l1_o['n_sku_changed'] > 0].copy()
-            if touched.empty:
-                st.info("Belum ada L1 yang terdampak.")
-            else:
-                l1_cols = ['l1_category_name', 'n_sku_total', 'n_sku_changed']
-                for s in O['scenarios']:
-                    l1_cols += [f'gp_{s}', f'gp_pct_{s}']
-                for v in variant_cols:
-                    l1_cols += [f'd_gp_{v}', f'd_gp_pp_{v}']
-                l1_cols = [c for c in l1_cols if c in touched.columns]
-                # sort by biggest absolute GP impact of first variant
-                if variant_cols and f'd_gp_{variant_cols[0]}' in touched.columns:
-                    touched = touched.reindex(
-                        touched[f'd_gp_{variant_cols[0]}'].abs().sort_values(ascending=False).index)
-                fmt = {}
-                for c in l1_cols:
-                    if 'gp_pct' in c: fmt[c] = '{:.1%}'
-                    elif 'd_gp_pp' in c: fmt[c] = '{:+.2%}'
-                    elif c.startswith('d_'): fmt[c] = '{:+,.0f}'
-                    elif c.startswith('gp_'): fmt[c] = '{:,.0f}'
-                    elif c.startswith('n_sku'): fmt[c] = '{:,}'
-                st.dataframe(touched[l1_cols].style.format(fmt, na_rep='—'),
-                             use_container_width=True, hide_index=True, height=320)
+        bl_touched = by_bl_o[by_bl_o['n_sku_changed'] > 0] if not by_bl_o.empty else pd.DataFrame()
+        l1_touched = by_l1_o[by_l1_o['n_sku_changed'] > 0] if not by_l1_o.empty else pd.DataFrame()
+
+        lens_options = ["🏢 Overall Astro"]
+        if not l1_touched.empty:
+            lens_options.append(f"🗂️ L1 Category ({len(l1_touched)} terdampak)")
+        if not bl_touched.empty:
+            lens_options.append(f"🧱 Pricing BL ({len(bl_touched)} terdampak)")
+        lens_options.append(f"🎯 SKU Diubah ({n_changed})")
+
+        st.markdown("##### 🔭 Pilih Lensa")
+        lens = st.radio("Lihat dampak dari sudut pandang:", lens_options,
+                        horizontal=True, key='sim_lens', label_visibility="collapsed")
+
+        st.markdown("")
+
+        # ═══════════════════ LENS: OVERALL (cards + pair tables) ═══════════════
+        if lens.startswith("🏢"):
+            st.caption(f"Basis: seluruh {n_total:,} SKU di File 1 (semua penjualan dalam range). "
+                       f"Hanya {n_changed:,} SKU yang harganya diubah — sisanya tetap harga asli.")
+            ob1, ob2, ob3, ob4 = st.columns(4)
+            with ob1:
+                st.markdown(kpi_card("Overall GV (baseline)", fmt_money(ov_base['gv'])), unsafe_allow_html=True)
+            with ob2:
+                st.markdown(kpi_card("Overall GP (baseline)", fmt_money(ov_base['gp'])), unsafe_allow_html=True)
+            with ob3:
+                st.markdown(kpi_card("Overall GP% (baseline)", fmt_pct(ov_base['gp_pct'])), unsafe_allow_html=True)
+            with ob4:
+                st.markdown(kpi_card("SKU diubah", f"{n_changed:,}",
+                                      sub=f"dari {n_total:,} total SKU"), unsafe_allow_html=True)
+
+            for v in variant_cols:
+                ov_v = ov.loc[v]
+                d_gv, d_gp = ov_v['gv'] - ov_base['gv'], ov_v['gp'] - ov_base['gp']
+                d_gp_pct = ov_v['gp_pct'] - ov_base['gp_pct']
+                share_gp = d_gp / ov_base['gp'] if ov_base['gp'] else np.nan
+                st.markdown(f"**↓ Impact `{v}` ke Overall Astro**")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.markdown(kpi_card(f"Overall GV — {v}", fmt_money(ov_v['gv']),
+                                          delta=d_gv, delta_label=fmt_money_delta(d_gv)), unsafe_allow_html=True)
+                with c2:
+                    st.markdown(kpi_card(f"Overall GP — {v}", fmt_money(ov_v['gp']),
+                                          delta=d_gp, delta_label=fmt_money_delta(d_gp)), unsafe_allow_html=True)
+                with c3:
+                    st.markdown(kpi_card(f"Overall GP% — {v}", fmt_pct(ov_v['gp_pct']),
+                                          delta=d_gp_pct, delta_label=fmt_pct_delta(d_gp_pct)), unsafe_allow_html=True)
+                with c4:
+                    st.markdown(kpi_card(f"Δ GP share — {v}",
+                                          fmt_pct(share_gp) if pd.notna(share_gp) else "—",
+                                          sub="Δ GP ÷ GP Astro baseline"), unsafe_allow_html=True)
+
+        # ═══════════════════ LENS: L1 CATEGORY (pair tables) ══════════════════
+        elif lens.startswith("🗂️"):
+            st.caption("Hanya L1 yang punya minimal 1 SKU diubah. Angka = agregat seluruh SKU di L1 itu. "
+                       "Satu tabel per variant: Baseline vs variant, beserta Diff & Diff%.")
+            t = l1_touched.copy()
+            if variant_cols and f'd_gp_{variant_cols[0]}' in t.columns:
+                t = t.reindex(t[f'd_gp_{variant_cols[0]}'].abs().sort_values(ascending=False).index)
+            rows = t.to_dict('records')
+            for v in variant_cols:
+                st.markdown(f"**📊 Baseline vs `{v}` — per L1 Category**")
+                st.dataframe(pair_table(rows, 'l1_category_name', 'L1 Category', v),
+                             use_container_width=True, hide_index=True)
+
+        # ═══════════════════ LENS: PRICING BL (pair tables) ═══════════════════
+        elif lens.startswith("🧱"):
+            st.caption("Hanya Pricing BL yang punya minimal 1 SKU diubah. Angka = agregat seluruh SKU di BL itu. "
+                       "Satu tabel per variant: Baseline vs variant, beserta Diff & Diff%.")
+            t = bl_touched.copy()
+            if variant_cols and f'd_gp_{variant_cols[0]}' in t.columns:
+                t = t.reindex(t[f'd_gp_{variant_cols[0]}'].abs().sort_values(ascending=False).index)
+            rows = t.to_dict('records')
+            for v in variant_cols:
+                st.markdown(f"**📊 Baseline vs `{v}` — per Pricing BL**")
+                st.dataframe(pair_table(rows, 'pricing_bl_25', 'Pricing BL', v),
+                             use_container_width=True, hide_index=True)
+
+        # ═══════════════════ LENS: SKU DIUBAH (cards + pair tables w/ PI) ═════
+        else:
+            st.caption("Fokus ke SKU yang lo reprice. PI = PI Blended Avg "
+                       "(selling_price × 100 ÷ avg_comp_price), qty-weighted — sengaja hanya SKU diubah, "
+                       "karena PI itu metrik posisi harga per-SKU vs kompetitor.")
+            bcol1, bcol2, bcol3, bcol4 = st.columns(4)
+            with bcol1:
+                st.markdown(kpi_card("Baseline GV", fmt_money(baseline_row['gv'])), unsafe_allow_html=True)
+            with bcol2:
+                st.markdown(kpi_card("Baseline GP", fmt_money(baseline_row['gp'])), unsafe_allow_html=True)
+            with bcol3:
+                st.markdown(kpi_card("Baseline GP%", fmt_pct(baseline_row['gp_pct'])), unsafe_allow_html=True)
+            with bcol4:
+                st.markdown(kpi_card("Baseline Avg PI", fmt_pi_detail(baseline_row['pi_avg_w']),
+                                      sub=f"Last day PI: {fmt_pi_detail(baseline_row['pi_last_w'])}"),
+                            unsafe_allow_html=True)
+
+            for v in variant_cols:
+                v_row = summary[summary['scenario'] == v].iloc[0]
+                d_gv = v_row['gv'] - baseline_row['gv']
+                d_gp = v_row['gp'] - baseline_row['gp']
+                d_gp_pct = v_row['gp_pct'] - baseline_row['gp_pct']
+                d_pi_avg = v_row['pi_avg_w'] - baseline_row['pi_avg_w']
+                d_pi_last = v_row['pi_last_w'] - baseline_row['pi_last_w']
+                st.markdown(f"**↓ Impact `{v}` (SKU diubah)**")
+                vc1, vc2, vc3, vc4 = st.columns(4)
+                with vc1:
+                    st.markdown(kpi_card(f"GV — {v}", fmt_money(v_row['gv']),
+                                          delta=d_gv, delta_label=fmt_money_delta(d_gv)), unsafe_allow_html=True)
+                with vc2:
+                    st.markdown(kpi_card(f"GP — {v}", fmt_money(v_row['gp']),
+                                          delta=d_gp, delta_label=fmt_money_delta(d_gp)), unsafe_allow_html=True)
+                with vc3:
+                    st.markdown(kpi_card(f"GP% — {v}", fmt_pct(v_row['gp_pct']),
+                                          delta=d_gp_pct, delta_label=fmt_pct_delta(d_gp_pct)), unsafe_allow_html=True)
+                with vc4:
+                    st.markdown(kpi_card(f"PI Avg — {v}", fmt_pi_detail(v_row['pi_avg_w']),
+                                          delta=d_pi_avg, delta_label=fmt_pi_delta(d_pi_avg),
+                                          sub=f"Δ PI Last: {fmt_pi_delta(d_pi_last)}",
+                                          delta_inverse=True), unsafe_allow_html=True)
 
         st.markdown("---")
-
-    baseline_row = summary[summary['scenario'] == 'baseline'].iloc[0]
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # 3B — DETAIL SKU YANG DIUBAH (price + PI focus)
-    # ═══════════════════════════════════════════════════════════════════════
-    # Build comparison: each variant vs baseline
-    st.markdown(f"##### 🎯 Detail SKU yang Diubah ({R['meta']['n_sku_simulated']:,} SKU)")
-    st.caption("Lensa ini fokus ke SKU yang lo reprice. PI di sini = PI Blended Avg "
-               "(selling_price × 100 ÷ avg_comp_price), qty-weighted — sengaja hanya SKU diubah, "
-               "karena PI itu metrik posisi harga per-SKU vs kompetitor.")
-
-    # Show baseline as reference
-    bcol1, bcol2, bcol3, bcol4 = st.columns(4)
-    with bcol1:
-        st.markdown(kpi_card("Baseline GV", fmt_money(baseline_row['gv'])), unsafe_allow_html=True)
-    with bcol2:
-        st.markdown(kpi_card("Baseline GP", fmt_money(baseline_row['gp'])), unsafe_allow_html=True)
-    with bcol3:
-        st.markdown(kpi_card("Baseline GP%", fmt_pct(baseline_row['gp_pct'])), unsafe_allow_html=True)
-    with bcol4:
-        st.markdown(kpi_card("Baseline Avg PI",
-                              fmt_pi_detail(baseline_row['pi_avg_w']),
-                              sub=f"Last day PI: {fmt_pi_detail(baseline_row['pi_last_w'])}"),
-                    unsafe_allow_html=True)
-
-    # Per variant impact
-    for v in variant_cols:
-        v_row = summary[summary['scenario'] == v].iloc[0]
-        d_gv     = v_row['gv'] - baseline_row['gv']
-        d_gp     = v_row['gp'] - baseline_row['gp']
-        d_gp_pct = v_row['gp_pct'] - baseline_row['gp_pct']
-        d_pi_avg = v_row['pi_avg_w'] - baseline_row['pi_avg_w']
-        d_pi_last= v_row['pi_last_w'] - baseline_row['pi_last_w']
-
-        st.markdown(f"**↓ Impact of `{v}` vs Baseline**")
-        v1, v2, v3, v4 = st.columns(4)
-        with v1:
-            st.markdown(kpi_card(f"GV — {v}", fmt_money(v_row['gv']),
-                                  delta=d_gv, delta_label=fmt_money_delta(d_gv)),
-                        unsafe_allow_html=True)
-        with v2:
-            st.markdown(kpi_card(f"GP — {v}", fmt_money(v_row['gp']),
-                                  delta=d_gp, delta_label=fmt_money_delta(d_gp)),
-                        unsafe_allow_html=True)
-        with v3:
-            st.markdown(kpi_card(f"GP% — {v}", fmt_pct(v_row['gp_pct']),
-                                  delta=d_gp_pct, delta_label=fmt_pct_delta(d_gp_pct)),
-                        unsafe_allow_html=True)
-        with v4:
-            # PI delta: turun = lebih kompetitif (positive direction). Pakai delta_inverse
-            st.markdown(kpi_card(
-                f"PI Avg — {v}",
-                fmt_pi_detail(v_row['pi_avg_w']),
-                delta=d_pi_avg,
-                delta_label=fmt_pi_delta(d_pi_avg),
-                sub=f"Δ PI Last: {fmt_pi_delta(d_pi_last)}",
-                delta_inverse=True
-            ), unsafe_allow_html=True)
 
 
     # ─────────────────────────────────────────────────────────────────────────
