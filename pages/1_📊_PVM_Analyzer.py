@@ -1047,6 +1047,21 @@ if file_changed:
         st.stop()
 
     # Validation panel
+    # If there's existing analysis (from prior file/dummy), notify user that they're about to replace it
+    if st.session_state.pvm_analysis is not None:
+        prev_file = st.session_state.pvm_uploaded_file_name or "data sebelumnya"
+        if st.session_state.pvm_is_dummy:
+            st.warning(
+                f"📂 **File baru terdeteksi:** `{uploaded.name}` — "
+                f"klik **🚀 Process Data** di bawah untuk **replace data dummy** dengan data real lo."
+            )
+        else:
+            st.warning(
+                f"📂 **File baru terdeteksi:** `{uploaded.name}` — "
+                f"akan **replace analisis dari `{prev_file}`** yang sekarang. "
+                f"Klik **🚀 Process Data** di bawah untuk proses file baru."
+            )
+
     st.markdown("### ✅ Validation")
     cols_in = list(df_input.columns)
 
@@ -1123,9 +1138,9 @@ if file_changed:
                 st.code(traceback.format_exc())
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ANALYSIS DISPLAY (only if data is processed)
+# ANALYSIS DISPLAY (only if data is processed AND no pending file change)
 # ─────────────────────────────────────────────────────────────────────────────
-if st.session_state.pvm_analysis is not None:
+if st.session_state.pvm_analysis is not None and not file_changed:
     A = st.session_state.pvm_analysis
     df = A['df']
     pvm = A['pvm']
