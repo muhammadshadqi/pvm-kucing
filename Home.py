@@ -86,6 +86,48 @@ with c2:
     """, unsafe_allow_html=True)
     st.page_link("pages/2_📈_PI_Analyzer.py", label="→ Buka PI Analyzer", icon="📈")
 
+# Row 2: Query Builder + Glossary
+c3, c4 = st.columns(2)
+
+with c3:
+    st.markdown("""
+    <div class="tool-card">
+        <span class="tool-tag">SQL TEMPLATE GENERATOR</span>
+        <div class="tool-title" style="margin-top: 8px;">🔍 Query Builder</div>
+        <div class="tool-sub">
+            Generate parameterized BigQuery SQL untuk PVM, PI, dan Page 3 analysis.
+            Tinggal pilih hari + tanggal, query auto-generated dengan substitution otomatis.
+        </div>
+        <div style="font-size: 13px; color: #374151;">
+            <strong>Tools available:</strong><br>
+            • Query 1 — PVM (weekly comparison)<br>
+            • Query 2 — PI (weekly comparison)<br>
+            • Query 3 — Date range analysis
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.page_link("pages/4_🔍_Query_Builder.py", label="→ Buka Query Builder", icon="🔍")
+
+with c4:
+    st.markdown("""
+    <div class="tool-card">
+        <span class="tool-tag">REFERENCE</span>
+        <div class="tool-title" style="margin-top: 8px;">📚 Glossary & Methodology</div>
+        <div class="tool-sub">
+            Lengkap dokumentasi semua definisi, threshold, dan methodologi yang dipakai di
+            PVM Analyzer + PI Analyzer.
+        </div>
+        <div style="font-size: 13px; color: #374151;">
+            <strong>Sections:</strong><br>
+            • Konsep dasar (PI, PVM, GP, CI)<br>
+            • Tagging & Threshold<br>
+            • Bucket definition & PI Positioning<br>
+            • Methodology (Shapley, Margin Bridge)
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.page_link("pages/5_📚_Glossary.py", label="→ Buka Glossary", icon="📚")
+
 st.markdown("---")
 
 with st.expander("ℹ️ Tentang Toolkit Ini"):
