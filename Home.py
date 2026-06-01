@@ -86,10 +86,30 @@ with c2:
     """, unsafe_allow_html=True)
     st.page_link("pages/2_📈_PI_Analyzer.py", label="→ Buka PI Analyzer", icon="📈")
 
-# Row 2: Query Builder + Glossary
+# Row 2: Price Simulator + Query Builder
 c3, c4 = st.columns(2)
 
 with c3:
+    st.markdown("""
+    <div class="tool-card">
+        <span class="tool-tag">WHAT-IF PRICE SCENARIO</span>
+        <div class="tool-title" style="margin-top: 8px;">⚖️ Price Simulator</div>
+        <div class="tool-sub">
+            Simulate dampak perubahan harga ke GP, Margin, dan PI per SKU.
+            Upload File 2 atau bikin scenario manual dengan multi-variant.
+        </div>
+        <div style="font-size: 13px; color: #374151;">
+            <strong>Use cases:</strong><br>
+            • What-if margin kalau harga turun 5%<br>
+            • Compare 2-3 scenarios side-by-side<br>
+            • Identify SKU yang aman naik/turun harga<br>
+            • Output Excel multi-sheet
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.page_link("pages/3_⚖️_Simulator.py", label="→ Buka Simulator", icon="⚖️")
+
+with c4:
     st.markdown("""
     <div class="tool-card">
         <span class="tool-tag">SQL TEMPLATE GENERATOR</span>
@@ -108,14 +128,17 @@ with c3:
     """, unsafe_allow_html=True)
     st.page_link("pages/4_🔍_Query_Builder.py", label="→ Buka Query Builder", icon="🔍")
 
-with c4:
+# Row 3: Glossary
+c5, c6 = st.columns(2)
+
+with c5:
     st.markdown("""
     <div class="tool-card">
         <span class="tool-tag">REFERENCE</span>
         <div class="tool-title" style="margin-top: 8px;">📚 Glossary & Methodology</div>
         <div class="tool-sub">
             Lengkap dokumentasi semua definisi, threshold, dan methodologi yang dipakai di
-            PVM Analyzer + PI Analyzer.
+            PVM Analyzer + PI Analyzer + Simulator.
         </div>
         <div style="font-size: 13px; color: #374151;">
             <strong>Sections:</strong><br>
