@@ -24,7 +24,8 @@ _PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 
-from simulator import compute as sim_compute, generate_excel as sim_generate_excel, REQUIRED_MASTER_COLS
+from simulator import (compute as sim_compute, generate_excel as sim_generate_excel,
+                       compute_overall_impact, REQUIRED_MASTER_COLS)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -220,6 +221,8 @@ if 'sim_manual_variant_count' not in st.session_state:
     st.session_state.sim_manual_variant_count = 2
 if 'sim_loaded_file2_name' not in st.session_state:
     st.session_state.sim_loaded_file2_name = None
+if 'sim_overall' not in st.session_state:
+    st.session_state.sim_overall = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -486,6 +489,8 @@ if df_master is not None:
         try:
             result = sim_compute(df_master, df_scenario)
             st.session_state.sim_result = result
+            # Full-universe impact (all of File 1; only changed SKU move)
+            st.session_state.sim_overall = compute_overall_impact(df_master, df_scenario)
             # Stash scenario bytes so Excel builder can reuse it
             buf = io.BytesIO()
             df_scenario.to_csv(buf, index=False)
@@ -502,6 +507,7 @@ if df_master is not None:
             st.code(traceback.format_exc())
     else:
         st.session_state.sim_result = None
+        st.session_state.sim_overall = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -523,10 +529,124 @@ if st.session_state.sim_result is not None:
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">3️⃣ Executive Summary</div>', unsafe_allow_html=True)
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # 3A — IMPACT KE OVERALL ASTRO (full File-1 universe; only changed SKU move)
+    # ═══════════════════════════════════════════════════════════════════════
+    O = st.session_state.get('sim_overall')
+    if O is not None and not O['overall'].empty:
+        ov = O['overall'].set_index('scenario')
+        ov_base = ov.loc['baseline']
+        n_total   = int(ov_base['n_sku_total'])
+        n_changed = int(ov_base['n_sku_changed'])
+
+        st.markdown(f"##### 🏢 Impact ke Overall Astro")
+        st.caption(f"Basis: seluruh {n_total:,} SKU di File 1 (semua penjualan dalam range). "
+                   f"Hanya {n_changed:,} SKU yang harganya diubah — sisanya tetap di harga asli. "
+                   f"Ini dampak repricing lo ke total Astro.")
+
+        # Baseline reference (overall)
+        ob1, ob2, ob3, ob4 = st.columns(4)
+        with ob1:
+            st.markdown(kpi_card("Overall GV (baseline)", fmt_money(ov_base['gv'])), unsafe_allow_html=True)
+        with ob2:
+            st.markdown(kpi_card("Overall GP (baseline)", fmt_money(ov_base['gp'])), unsafe_allow_html=True)
+        with ob3:
+            st.markdown(kpi_card("Overall GP% (baseline)", fmt_pct(ov_base['gp_pct'])), unsafe_allow_html=True)
+        with ob4:
+            st.markdown(kpi_card("SKU diubah", f"{n_changed:,}",
+                                  sub=f"dari {n_total:,} total SKU"), unsafe_allow_html=True)
+
+        # Per-variant impact on overall
+        for v in variant_cols:
+            ov_v = ov.loc[v]
+            d_gv     = ov_v['gv'] - ov_base['gv']
+            d_gp     = ov_v['gp'] - ov_base['gp']
+            d_gp_pct = ov_v['gp_pct'] - ov_base['gp_pct']
+            # % share of impact vs baseline GP (how big is the dent in total Astro GP)
+            share_gp = d_gp / ov_base['gp'] if ov_base['gp'] else np.nan
+
+            st.markdown(f"**↓ Impact `{v}` ke Overall Astro**")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.markdown(kpi_card(f"Overall GV — {v}", fmt_money(ov_v['gv']),
+                                      delta=d_gv, delta_label=fmt_money_delta(d_gv)),
+                            unsafe_allow_html=True)
+            with c2:
+                st.markdown(kpi_card(f"Overall GP — {v}", fmt_money(ov_v['gp']),
+                                      delta=d_gp, delta_label=fmt_money_delta(d_gp)),
+                            unsafe_allow_html=True)
+            with c3:
+                st.markdown(kpi_card(f"Overall GP% — {v}", fmt_pct(ov_v['gp_pct']),
+                                      delta=d_gp_pct, delta_label=fmt_pct_delta(d_gp_pct)),
+                            unsafe_allow_html=True)
+            with c4:
+                st.markdown(kpi_card(f"Δ GP share — {v}", fmt_pct(share_gp) if pd.notna(share_gp) else "—",
+                                      sub="Δ GP ÷ GP Astro baseline"),
+                            unsafe_allow_html=True)
+
+        # ── Pricing BL terdampak ──
+        st.markdown("##### 🧱 Pricing BL Terdampak")
+        st.caption("Agregat seluruh SKU per BL; hanya BL yang punya SKU diubah yang bergerak. "
+                   "BL dengan Δ = 0 berarti tidak ada SKU yang lo ubah di situ.")
+        by_bl = O['by_bl']
+        if not by_bl.empty:
+            bl_show_cols = ['pricing_bl_25', 'n_sku_total', 'n_sku_changed']
+            for s in O['scenarios']:
+                bl_show_cols += [f'gv_{s}', f'gp_{s}', f'gp_pct_{s}']
+            for v in variant_cols:
+                bl_show_cols += [f'd_gv_{v}', f'd_gp_{v}', f'd_gp_pp_{v}']
+            bl_show_cols = [c for c in bl_show_cols if c in by_bl.columns]
+            fmt = {}
+            for c in bl_show_cols:
+                if 'gp_pct' in c: fmt[c] = '{:.1%}'
+                elif 'd_gp_pp' in c: fmt[c] = '{:+.2%}'
+                elif c.startswith('d_'): fmt[c] = '{:+,.0f}'
+                elif c.startswith('gv_') or c.startswith('gp_'): fmt[c] = '{:,.0f}'
+                elif c.startswith('n_sku'): fmt[c] = '{:,}'
+            st.dataframe(by_bl[bl_show_cols].style.format(fmt, na_rep='—'),
+                         use_container_width=True, hide_index=True)
+
+        # ── L1 terdampak (only those with a changed SKU) ──
+        st.markdown("##### 🗂️ L1 Category Terdampak")
+        st.caption("Hanya L1 yang punya minimal 1 SKU diubah. Angka = agregat seluruh SKU di L1 itu.")
+        by_l1_o = O['by_l1']
+        if not by_l1_o.empty:
+            touched = by_l1_o[by_l1_o['n_sku_changed'] > 0].copy()
+            if touched.empty:
+                st.info("Belum ada L1 yang terdampak.")
+            else:
+                l1_cols = ['l1_category_name', 'n_sku_total', 'n_sku_changed']
+                for s in O['scenarios']:
+                    l1_cols += [f'gp_{s}', f'gp_pct_{s}']
+                for v in variant_cols:
+                    l1_cols += [f'd_gp_{v}', f'd_gp_pp_{v}']
+                l1_cols = [c for c in l1_cols if c in touched.columns]
+                # sort by biggest absolute GP impact of first variant
+                if variant_cols and f'd_gp_{variant_cols[0]}' in touched.columns:
+                    touched = touched.reindex(
+                        touched[f'd_gp_{variant_cols[0]}'].abs().sort_values(ascending=False).index)
+                fmt = {}
+                for c in l1_cols:
+                    if 'gp_pct' in c: fmt[c] = '{:.1%}'
+                    elif 'd_gp_pp' in c: fmt[c] = '{:+.2%}'
+                    elif c.startswith('d_'): fmt[c] = '{:+,.0f}'
+                    elif c.startswith('gp_'): fmt[c] = '{:,.0f}'
+                    elif c.startswith('n_sku'): fmt[c] = '{:,}'
+                st.dataframe(touched[l1_cols].style.format(fmt, na_rep='—'),
+                             use_container_width=True, hide_index=True, height=320)
+
+        st.markdown("---")
+
     baseline_row = summary[summary['scenario'] == 'baseline'].iloc[0]
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # 3B — DETAIL SKU YANG DIUBAH (price + PI focus)
+    # ═══════════════════════════════════════════════════════════════════════
     # Build comparison: each variant vs baseline
-    st.markdown(f"##### Baseline vs Variants ({R['meta']['n_sku_simulated']:,} SKU)")
+    st.markdown(f"##### 🎯 Detail SKU yang Diubah ({R['meta']['n_sku_simulated']:,} SKU)")
+    st.caption("Lensa ini fokus ke SKU yang lo reprice. PI di sini = PI Blended Avg "
+               "(selling_price × 100 ÷ avg_comp_price), qty-weighted — sengaja hanya SKU diubah, "
+               "karena PI itu metrik posisi harga per-SKU vs kompetitor.")
 
     # Show baseline as reference
     bcol1, bcol2, bcol3, bcol4 = st.columns(4)
