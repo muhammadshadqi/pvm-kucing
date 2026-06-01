@@ -832,6 +832,21 @@ if file_changed:
         st.error(f"❌ Gagal load file: {e}")
         st.stop()
 
+    # Notice when replacing existing analysis
+    if st.session_state.pi_analysis is not None:
+        prev_file = st.session_state.pi_uploaded_file_name or "data sebelumnya"
+        if st.session_state.pi_is_dummy:
+            st.warning(
+                f"📂 **File baru terdeteksi:** `{uploaded.name}` — "
+                f"klik **🚀 Process Data** di bawah untuk **replace data dummy** dengan data real lo."
+            )
+        else:
+            st.warning(
+                f"📂 **File baru terdeteksi:** `{uploaded.name}` — "
+                f"akan **replace analisis dari `{prev_file}`** yang sekarang. "
+                f"Klik **🚀 Process Data** di bawah untuk proses file baru."
+            )
+
     # Validation panel
     st.markdown("### ✅ Validation")
     cols_in = list(df_input.columns)
@@ -891,9 +906,9 @@ if file_changed:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MAIN DASHBOARD (only if analysis available)
+# MAIN DASHBOARD (only if analysis available AND no pending file change)
 # ═══════════════════════════════════════════════════════════════════════════
-if st.session_state.pi_analysis is not None:
+if st.session_state.pi_analysis is not None and not file_changed:
     result = st.session_state.pi_analysis
     df = result['df_enriched']
     overall = result['overall']
