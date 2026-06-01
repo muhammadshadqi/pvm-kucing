@@ -151,6 +151,99 @@ def compute(df_master, df_scenario):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OVERALL IMPACT — full Astro universe (File 1 = all sales in range)
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_overall_impact(df_master, df_scenario):
+    """
+    Impact of repricing the selected SKU on the FULL universe (all of File 1).
+
+    Logic:
+      - Changed SKU (in df_scenario)  -> price = scenario price (baseline / var_N)
+      - Unchanged SKU (rest of File1) -> price = original selling_price (constant
+        across all scenarios)
+      - Overall / per-BL / per-L1 = aggregate of EVERYONE, but only changed SKU move.
+
+    Returns dict with:
+      overall : DataFrame per scenario (gv, gp, gp_pct, n_sku_total, n_sku_changed)
+      by_bl   : DataFrame per pricing_bl_25 per scenario + deltas
+      by_l1   : DataFrame per l1_category_name per scenario + deltas
+      variant_cols, scenarios
+    """
+    df_master = df_master.copy()
+    df_scenario = df_scenario.copy()
+    df_master['product_id'] = df_master['product_id'].astype(str).str.strip()
+    df_scenario['product_id'] = df_scenario['product_id'].astype(str).str.strip()
+
+    variant_cols = [c for c in df_scenario.columns if c not in ('product_id', 'baseline')]
+    scenarios = ['baseline'] + variant_cols
+
+    # Map: product_id -> {scenario: price} for changed SKU only
+    scn_map = df_scenario.set_index('product_id')
+
+    u = df_master.copy()
+    u['cogs_total'] = u['qty'] * u['cost_price']
+    u['is_changed'] = u['product_id'].isin(scn_map.index)
+
+    # Effective price per scenario for EVERY SKU
+    for s in scenarios:
+        # default = original selling_price (unchanged SKU stay flat across scenarios)
+        eff = u['selling_price'].copy()
+        if s in scn_map.columns or s == 'baseline':
+            col = 'baseline' if s == 'baseline' else s
+            # changed SKU -> scenario price (fall back to selling_price if NaN)
+            mapped = u['product_id'].map(scn_map[col]) if col in scn_map.columns else pd.Series(np.nan, index=u.index)
+            eff = np.where(u['is_changed'] & mapped.notna(), mapped, u['selling_price'])
+        u[f'gv_{s}'] = u['qty'] * eff
+        u[f'gp_{s}'] = u[f'gv_{s}'] - u['cogs_total']
+
+    def _agg(g):
+        row = {'n_sku_total': len(g), 'n_sku_changed': int(g['is_changed'].sum()),
+               'qty': g['qty'].sum(), 'cogs': g['cogs_total'].sum()}
+        for s in scenarios:
+            gv = g[f'gv_{s}'].sum(); gp = g[f'gp_{s}'].sum()
+            row[f'gv_{s}'] = gv
+            row[f'gp_{s}'] = gp
+            row[f'gp_pct_{s}'] = gp / gv if gv > 0 else np.nan
+        for v in variant_cols:
+            row[f'd_gv_{v}']     = row[f'gv_{v}'] - row['gv_baseline']
+            row[f'd_gp_{v}']     = row[f'gp_{v}'] - row['gp_baseline']
+            row[f'd_gp_pp_{v}']  = row[f'gp_pct_{v}'] - row['gp_pct_baseline']
+        return row
+
+    # Overall (single row table per scenario, transposed-friendly)
+    overall = pd.DataFrame([{'scenario': s,
+                             'gv': u[f'gv_{s}'].sum(),
+                             'gp': u[f'gp_{s}'].sum(),
+                             'gp_pct': (u[f'gp_{s}'].sum() / u[f'gv_{s}'].sum()
+                                        if u[f'gv_{s}'].sum() > 0 else np.nan),
+                             'n_sku_total': len(u),
+                             'n_sku_changed': int(u['is_changed'].sum())}
+                            for s in scenarios])
+
+    def _by_dim(dim):
+        if dim not in u.columns:
+            return pd.DataFrame()
+        rows = []
+        for dim_val, g in u.groupby(dim, dropna=False):
+            if pd.isna(dim_val):
+                continue
+            r = {dim: dim_val, **_agg(g)}
+            rows.append(r)
+        out = pd.DataFrame(rows)
+        if not out.empty:
+            out = out.sort_values('gp_baseline', ascending=False)
+        return out
+
+    return {
+        'overall':      overall,
+        'by_bl':        _by_dim('pricing_bl_25'),
+        'by_l1':        _by_dim('l1_category_name'),
+        'scenarios':    scenarios,
+        'variant_cols': variant_cols,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # AGGREGATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 def build_summary(df, scenarios, variant_cols):
