@@ -1,45 +1,22 @@
 """
-Astro Pricing Strategy Toolkit — Landing Page
+Pricing Strategy Toolkit — Landing Page
 """
 import streamlit as st
+from brand import inject_brand, render_brand_header
 
 st.set_page_config(
-    page_title="Astro Pricing Toolkit",
+    page_title="Pricing Toolkit",
     page_icon="🛒",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Header
-st.markdown("""
-<style>
-    .main > div { padding-top: 2rem; }
-    .hero-title {
-        font-size: 42px; font-weight: 800; color: #111827;
-        margin-bottom: 4px;
-    }
-    .hero-sub {
-        font-size: 18px; color: #6B7280; margin-bottom: 32px;
-    }
-    .tool-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 12px;
-        padding: 24px;
-        background: #FFFFFF;
-        margin-bottom: 16px;
-        height: 100%;
-    }
-    .tool-title { font-size: 22px; font-weight: 700; color: #111827; margin-bottom: 8px; }
-    .tool-sub { font-size: 14px; color: #6B7280; margin-bottom: 16px; }
-    .tool-tag { font-size: 11px; color: #2563EB; background: #DBEAFE;
-                padding: 4px 10px; border-radius: 12px; display: inline-block;
-                font-weight: 600; }
-</style>
-""", unsafe_allow_html=True)
+inject_brand()
 
-st.markdown('<div class="hero-title">🛒 Astro Pricing Strategy Toolkit</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">Internal analysis suite — PVM decomposition & PI movement diagnostics</div>',
-            unsafe_allow_html=True)
+render_brand_header(
+    "Pricing Strategy Toolkit",
+    "Internal analysis suite — PVM decomposition & PI movement diagnostics",
+)
 
 st.markdown("---")
 st.markdown("### Pilih Tool")
@@ -155,7 +132,7 @@ st.markdown("---")
 
 with st.expander("ℹ️ Tentang Toolkit Ini"):
     st.markdown("""
-    **Built by:** Shadqi (Pricing Strategy Analyst, Astro)
+    **Built by:** Shadqi (Pricing Strategy Analyst)
 
     **Tech stack:** Streamlit + Pandas + Openpyxl + Plotly
 
@@ -164,5 +141,5 @@ with st.expander("ℹ️ Tentang Toolkit Ini"):
     **Persistence:** Data yang sudah di-process di Page 1 atau Page 2 akan tetap stay
     selama session aktif (gak perlu re-upload saat navigate antar page).
 
-    **Source code:** Internal — Astro Pricing Strategy team
+    **Source code:** Internal — Pricing Strategy team
     """)
